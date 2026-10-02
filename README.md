@@ -150,14 +150,15 @@ This version moves the mechanical rules into code (own CAD instance that cannot 
 
 ## How it works
 
-```
- agent  ──►  SKILL.md (when and how)  ──►  scripts/cad.py <command>
-                                               │
-                                      cadlib  ─┼─ ezdxf ............ read, search, diff, approximate render
-                                               ├─ ODA / LibreDWG ... DWG ⇄ DXF (separate programs)
-                                               └─ CAD via COM ...... only with consent, Windows, own instance
-                                               │
-                                      one short JSON on stdout  +  files in a fresh run directory
+```mermaid
+flowchart TD
+    agent([Your AI agent]) -->|reads when and how| skill[SKILL.md]
+    skill --> cli["scripts/cad.py &lt;command&gt;"]
+    cli --> lib[cadlib]
+    lib --> ezdxf["ezdxf<br/>read, search, diff,<br/>approximate render"]
+    lib --> conv["ODA File Converter / LibreDWG<br/>DWG to DXF (separate programs)"]
+    lib -. "only with your consent<br/>Windows, own instance" .-> cad["Your CAD application<br/>via COM"]
+    lib --> out[/"one short JSON on stdout<br/>+ files in a fresh run directory"/]
 ```
 
 ## Requirements
@@ -183,15 +184,13 @@ Developed and tested on Windows 11 with AutoCAD 2024. The automated tests run on
 
 ## FAQ
 
-**Do I need AutoCAD?** No. DXF works with open-source libraries alone. For DWG, install ODA File Converter or LibreDWG, or let the skill use your AutoCAD.
-
-**Will it change my drawings?** No. Source files are never written. Results go to a new folder.
-
-**Can it run while I work in AutoCAD?** Yes. It starts its own instance and never touches yours. It is still wise to save your work before agreeing to a CAD run.
-
-**What are the exit codes?** `0` ok, `1` error, `2` bad arguments, `3` missing dependency or backend, `4` resource busy, `5` timeout, `6` precondition not met, `7` partial success. Every command also says so in its JSON.
-
-**How do I clean up?** `python skills/cad-drawings/scripts/cad.py cleanup --list`, then `--older-than DAYS --yes`.
+| Question | Answer |
+|---|---|
+| Do I need AutoCAD? | No. DXF works with open-source libraries alone. For DWG, install ODA File Converter or LibreDWG, or let the skill use your AutoCAD. |
+| Will it change my drawings? | No. Source files are never written. Results go to a new folder. |
+| Can it run while I work in AutoCAD? | Yes. It starts its own instance and never touches yours. It is still wise to save your work before agreeing to a CAD run. |
+| What are the exit codes? | `0` ok, `1` error, `2` bad arguments, `3` missing dependency or backend, `4` resource busy, `5` timeout, `6` precondition not met, `7` partial success. Every command also says so in its JSON. |
+| How do I clean up? | `python skills/cad-drawings/scripts/cad.py cleanup --list`, then `--older-than DAYS --yes`. |
 
 ## Documentation
 
