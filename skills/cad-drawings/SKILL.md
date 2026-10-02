@@ -1,15 +1,14 @@
 ---
 name: cad-drawings
 description: >-
-  Use this skill when the user wants to inspect, compare, render, measure or edit CAD drawings
+  Use this skill when the user wants to inspect, compare, render, measure, edit, or plot CAD drawings
   in DWG or DXF format, even if they only mention "show me this plan", "what changed between
-  these revisions", "update the title blocks", "export the sheets to PDF", or "how big is
+  these revisions", "update the title blocks", "export the sheets to PDF", "I need PDFs", or "how big is
   this area". Handles layers, texts, blocks and attributes, layouts and viewports, units and
-  underlay alignment, and failing CAD automation (RPC rejections, hung processes). Works on
-  Windows, macOS and Linux without AutoCAD; uses AutoCAD or a compatible CAD via COM on
-  Windows only when the user agrees. For deliverable PDFs or editing, write custom code on
-  top of the bundled COM library. Not for Revit, SketchUp, 3D models, or PDF or raster
-  image editing.
+  underlay alignment, and failing CAD automation (RPC rejections, hung processes). Edits DXF directly and DWG
+  through the CAD application. Works on Windows, macOS and Linux without AutoCAD; uses AutoCAD or
+  a compatible CAD via COM on Windows only when the user explicitly agrees. Not for Revit, SketchUp,
+  3D models, or PDF or raster image editing.
 license: MIT
 compatibility: >-
   Python 3.10+ with ezdxf 1.4.4+ and pypdfium2. DWG files require AutoCAD or a compatible CAD
@@ -56,6 +55,9 @@ Put the recommended option first and explain why. Do not ask about anything the 
 | Read DWG | Convert to DXF first (row above), then ezdxf | same | Exit 3 |
 | Render preview PNG | ezdxf drawing (approximate, flagged) | COM plot per layout (`--allow-com`; may open the user's PDF viewer) | Exit 3 if a required package is missing |
 | PDF to PNG raster | pypdfium2 | PyMuPDF (AGPL, optional, `--raster pymupdf`) | — |
+| Edit a DXF | ezdxf (DXF only) | — | — |
+| Edit a DWG | — | COM (`--allow-com`) | Exit 3 if no CAD |
+| Plot sheets to PDF | — | COM (`--allow-com`; deliverable, not preview) | Exit 3 if no CAD |
 
 "Available" means the tool is installed and, for CAD hosts, that the user agreed or already uses that host. Detecting without running CAD is fast; the full check (`doctor --probe-com`) starts a CAD session and may claim a licence.
 
@@ -71,6 +73,8 @@ Run `python scripts/cad.py --help` for the full list. Each command can be called
 - `fingerprint` — JSON signature of graphic entities (handles, layer, bbox, text hash, viewport table)
 - `diff` — Semantic diff of two fingerprints or drawings, ignoring save noise
 - `convert` — DWG ↔ DXF (`--to dxf|dwg`, `--out`, `--overwrite`, `--dry-run`)
+- `edit` — Apply a plan of edits to a DXF or DWG (two-pass validation, verified against the original)
+- `plot` — Deliverable PDFs per layout, plotted by the CAD application (`--allow-com` required)
 - `cleanup` — List and delete run directories and cache, with dry-run preview
 
 All commands write to a fresh run directory (never next to the source). Large results go to files; the JSON summary stays under ~4 KB. Commands that can read a DWG accept `--allow-com` (the user agreed to start their CAD application) and `--backend auto|com|oda|libredwg`; `render` uses `--backend auto|com|ezdxf` for the render engine. Failed commands still report `run_dir` and `log`.
@@ -137,30 +141,56 @@ python scripts/cad.py dump <file> --space model --type HATCH --type LWPOLYLINE -
 
 Export the boundary or hatch entity. Parse the result with ezdxf: compute area or length in model units, convert to the requested unit, state which entity the number came from. When the hatch has islands the area of the boundary differs from the hatch area; always report which one and why. Ignore closed shapes that are not filled or dimensioned (they may be guides or orphaned geometry). For closed polylines compute the area with `ezdxf.math.area(vertices)` (ezdxf is already installed); never read dimensions off a rendered PNG.
 
-### Editing and plotting (no command yet)
+### Edit a drawing
 
-Commands for editing DWG files and producing deliverable PDFs do not ship in this version. With a CAD host on Windows, write a short script on top of the bundled session library instead of driving COM by hand:
+Get the handles of the entities to change using `find` or `dump`:
 
-```python
-import sys
-from pathlib import Path
-
-SKILL_DIR = "<path of the folder that contains this SKILL.md>"
-sys.path.insert(0, SKILL_DIR + "/scripts")
-
-from cadlib.acad import AcadSession
-from cadlib.runs import RunContext, stage_copy
-
-ctx = RunContext.create("custom-plot")  # fresh run directory, never next to the source
-working = stage_copy(Path("<drawing>.dwg"), ctx)  # work on a copy, never on the original
-with AcadSession.start() as session:  # own CAD instance; quits and cleans up on exit
-    warnings = session.plot_layout_pdf(working, "<layout name>", ctx.path("sheet.pdf"))
-print(warnings)  # read them: fallbacks and side effects are listed here
+```sh
+python scripts/cad.py find <file> --pattern "old text"
+python scripts/cad.py dump <file> --space model --type TEXT --limit 20
 ```
 
-- `plot_layout_pdf` writes straight to a path that must not exist yet, opens a fresh document per call, and uses a built-in PDF device when the layout has no plotter (it says so in the warnings). The PDF plotter may open the user's default PDF viewer; COM cannot switch that off, so tell the user.
-- For edits: find handles with `find`/`dump` first, open the copy with `session.open(path, readonly=False)`, change those handles through the document's COM object, write the result with `session.save_dwg(doc, ctx.path("edited.dwg"))`, then verify with `fingerprint` and `diff`.
-- Do not reimplement connection, retry, document lookup, plotting, locking or cleanup; read the `cadlib.acad` docstrings for the full API. Ask the user before writing to their files or over an existing output.
+Every `find` and `dump` hit carries an `expect` object (type, layer, space, current text...). Paste it unchanged into the plan next to the handle: the executor refuses to touch an entity that no longer matches it. Build the plan as JSON conforming to `assets/edit-spec.schema.json` (it also records the SHA-1 of the file the handles came from); see `references/edit-plans.md` for the format and a worked example.
+
+Check the plan:
+
+```sh
+python scripts/cad.py edit --spec edits.json --dry-run
+```
+
+Apply to a DXF:
+
+```sh
+python scripts/cad.py edit --spec edits.json
+```
+
+Apply to a DWG (needs consent):
+
+```sh
+python scripts/cad.py edit --spec edits.json --allow-com
+```
+
+The edited file lands in the run directory (with an `_edited` suffix); the original is never written. The command checks its own work: it compares the edited file with the original and exits with 7 and `UNINTENDED_CHANGE` if anything changed that the plan did not ask for, so read `verified` and `unintended` in the summary rather than assuming success. A plan that was already applied reports `already_applied` instead of failing. Confirm visually with `render` when the change affects how a sheet looks. Ask the user before copying the result over an original (`--out ... --overwrite`). Read `references/edit-plans.md` for handle persistence and idempotence: handles belong to one version of one file, so build a new plan from fresh `find` output after every save.
+
+### Plot sheets for delivery
+
+Ask the user for consent first: a CAD application will start, and the PDF viewer may open.
+
+Get the available paper layouts and page setups:
+
+```sh
+python scripts/cad.py info <file> --conventions
+```
+
+Build a command with desired options (device, media, scale, rotation, area):
+
+```sh
+python scripts/cad.py plot <file> --allow-com --layout "Sheet-A" --scale fit --dest ./pdfs
+```
+
+The command plots one layout per PDF and optionally copies them to a destination. See `references/plotting.md` for page-setup options and the exact plotter behaviour.
+
+For custom edits or plots beyond these commands, for more control, read `references/com-automation.md` and write a short script on top of the bundled session library.
 
 ## Project conventions
 
@@ -204,6 +234,12 @@ Conventions capture what the drawings teach: sheet sizes, units, layer naming, t
 
 - **Do not name helper scripts after standard-library modules.** `inspect.py` and other stdlib names break imports.
 
+- **Handles are valid only for the exact file version they were read from.** After an edit (or any CAD save), handles change: a plan made from file v1 will not work on the edited file. Rebuild the plan from a fresh `find` or `dump` after each edit, or edit multiple entities in one run using the same handles.
+
+- **Edit plans are idempotent.** Running the same plan twice on the edited file reports every edit as already applied (second time around). The only exception is `clone`, which adds another copy.
+
+- **Never edit the original file.** The `edit` command works on a copy in the run directory. The output goes to a new file (`<stem>_edited.dxf` or `.dwg`) or a user-specified path. Verify the result before using it.
+
 ## Output and long jobs
 
 Every command prints a JSON summary on stdout:
@@ -229,8 +265,10 @@ Exit codes: 0 = success, 1 = error, 2 = bad arguments, 3 = missing dependency or
 
 | Read this… | When you… |
 |---|---|
-| `references/com-automation.md` | Write custom code using the COM library (HRESULT table, late-binding traps, `HandleToObject`, retry patterns, document lifecycle) |
-| `references/dxf-analysis.md` | Write ezdxf code (entity queries, MTEXT, plain vs raw text, block/space mapping, handle limits) |
+| `references/plotting.md` | Plot with `plot` (device, media, area, scale, rotation, page setup fallbacks) |
+| `references/edit-plans.md` | Edit with `edit` (plan format, handle persistence, operations, verification, idempotence) |
+| `references/com-automation.md` | Write custom code using the COM library or edit through the CAD application (HRESULT table, late-binding traps, `HandleToObject`, retry patterns, document lifecycle, editing traps) |
+| `references/dxf-analysis.md` | Write ezdxf code or understand `edit` on a DXF (entity queries, MTEXT, plain vs raw text, block/space mapping, handle limits) |
 | `references/backends-and-install.md` | `doctor` reports missing components and you need per-OS install commands or license notes |
 | `references/visual-qa.md` | Verify a rendered or printed sheet (crop assumptions, DPI vs text height, QA checklist) |
 | `references/drafting-standards.md` | Add, edit or delete drawing content without a project `CAD_CONVENTIONS.md` (sheet sizes, title blocks, layers, text heights, units) |

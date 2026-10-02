@@ -57,9 +57,9 @@ The repository has several hundred automated tests (run `pytest`), plus a small 
 
 ## Not yet measured
 
-- The update-and-plot task (needs the `plot` and `edit` commands).
-- Real-world drawings from outside the synthetic set.
-- Behaviour on macOS and Linux outside CI.
-- Other CAD applications that expose the same COM interface.
+- The `edit` and `plot` commands (F2 phase 2): both are implemented but not yet measured end-to-end against the same test tasks.
+- Real-world drawings from outside the synthetic set (all tests use synthetic fixtures).
+- Behaviour on macOS and Linux outside CI (rendering and conversion are portable; CAD automation is Windows-only).
+- Other CAD applications that expose the same COM interface (BricsCAD, ZWCAD, GstarCAD are detected but untested).
 
 When these are measured they will be added here with the date and the method.

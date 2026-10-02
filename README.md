@@ -68,6 +68,8 @@ python skills/cad-drawings/scripts/doctor.py
 - **Compare** two revisions semantically: a re-save renumbers handles and renames anonymous blocks, and the diff ignores that noise and lists only real changes.
 - **Convert** between DWG and DXF through the best available backend.
 - **Render** each layout to PNG, with crop and tiles for checking details.
+- **Edit** DXF directly or DWG through the CAD application: replace text, change properties, move entities, clone copies, delete, and pan viewports. Every edit is validated in two passes and verified against the original.
+- **Plot** deliverable PDFs from the CAD application with control over device, media, scale, rotation, and plot area.
 - **Short JSON on stdout** from every command, details in files, meaningful exit codes. Agents never have to parse a wall of text or guess whether a command failed.
 
 ## Example
@@ -94,6 +96,37 @@ python skills/cad-drawings/scripts/cad.py diff sheet_set_v1.dxf plan_v2.dxf
 ```
 
 Three real changes found, 37 renumbered handles and four other save artefacts reported as noise, and no claim about *why* the circle disappeared. That last part is deliberate: the skill never invents a reason.
+
+### Edit plan example
+
+Find entities to change:
+
+```bash
+python skills/cad-drawings/scripts/cad.py find plan.dxf --pattern "DRAFT"
+```
+
+Build and apply an edit plan:
+
+```bash
+# edits.json:
+{
+  "version": 1,
+  "base": {"path": "plan.dxf", "sha1": "abc123..."},
+  "edits": [
+    {
+      "id": "status_1",
+      "op": "replace-text",
+      "handle": "15A",
+      "expect": {"type": "TEXT", "text": "DRAFT"},
+      "args": {"old": "DRAFT", "new": "FINAL"}
+    }
+  ]
+}
+
+python skills/cad-drawings/scripts/cad.py edit --spec edits.json
+```
+
+The edited file (`plan_edited.dxf`) lands in the run directory, verified against the original. The report lists every change; the changeset shows applied edits.
 
 ## Why this exists
 
@@ -143,10 +176,10 @@ Developed and tested on Windows 11 with AutoCAD 2024. The automated tests run on
 
 ## When not to use it
 
-- **Editing or plotting deliverables.** `plot` and `edit` commands are planned. Today a session library (`cadlib.acad`) is available for custom scripts; see [SKILL.md](skills/cad-drawings/SKILL.md).
 - **3D models, Revit, SketchUp, BIM.** This is about 2D DWG and DXF drawings.
-- **Pixel-exact output without CAD.** Without a CAD plot, renders are approximate (substitute fonts, no plot styles unless you give a `.ctb`).
+- **Pixel-exact preview without CAD.** Without a CAD plot, renders are approximate (substitute fonts, no plot styles unless you give a `.ctb`). For deliverable PDFs, use `plot` with the CAD application.
 - **A DWG with no converter and no CAD.** The command stops with exit code 3 and tells you the install options.
+- **Complex drawing automation.** For sophisticated workflows beyond simple edits and plots, write a script on top of the bundled `cadlib.acad` session library; see [SKILL.md](skills/cad-drawings/SKILL.md).
 
 ## FAQ
 

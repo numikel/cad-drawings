@@ -11,7 +11,10 @@ First public version (0.1.0 once released). Measured baseline and method: [docs/
 
 ### Added
 
-- **Commands** (`python scripts/cad.py <command>`): `doctor`, `info`, `find`, `dump`, `fingerprint`, `diff`, `render`, `convert`, `cleanup`. Every command prints one short JSON summary (under about 4 KB) validated against `assets/output.schema.json`; large results go to files in a fresh run directory.
+- **`plot`:** deliverable PDFs through the user's CAD application (`--allow-com`), one fresh document per layout, explicit page setup (device, media, area, scale, rotation, plot style), verification of every PDF, safe `--dest` copy that never overwrites silently.
+- **`edit`:** executes an edit plan in two passes (validate everything first, then apply) on DXF through ezdxf and on DWG through the user's CAD; six operations (`replace-text`, `set-props`, `delete`, `move`, `clone`, `pan-viewport`); idempotent; checks its own result against the original and reports unintended changes; never touches the original.
+- **References:** `references/plotting.md`, `references/edit-plans.md`.
+- **Read-side commands** (`python scripts/cad.py <command>`): `doctor`, `info`, `find`, `dump`, `fingerprint`, `diff`, `render`, `convert`, `cleanup`. Every command prints one short JSON summary (under about 4 KB) validated against `assets/output.schema.json`; large results go to files in a fresh run directory.
 - **Reading:** DXF through ezdxf; DWG through a converter (ODA File Converter, LibreDWG) or, only with `--allow-com`, the user's own CAD application on Windows.
 - **Search** across model space, every layout, block definitions, attributes, layer and block names, with `visible_in_space` and a geometry-based `prints_on`.
 - **Semantic diff** that ignores re-save noise (renumbered handles, anonymous block names, viewport ids, `$HANDSEED`) and never states why something changed.
@@ -28,12 +31,13 @@ First public version (0.1.0 once released). Measured baseline and method: [docs/
 
 ### Known limitations
 
-- No `plot` or `edit` command yet; the session library can be used from custom scripts.
+- `pan-viewport` is not supported on DWG edits; `clone` into another space is not supported on DWG edits (both work on DXF).
+- Some edit operations are covered only by tests with a fake CAD (see `references/edit-plans.md`).
 - `find --pattern` limits input length but cannot stop a pathological regular expression.
 - Plotting through the CAD application may open the user's default PDF viewer; the result carries a warning.
 - Verified on synthetic drawings and one CAD version (AutoCAD 2024 on Windows 11); macOS and Linux are covered by CI only.
 
 ### Planned
 
-- `plot` and `edit` (next), then `measure`, `register`, `qa`.
+- `measure`, `register`, `qa`.
 - Claude Code plugin manifest and marketplace entry.

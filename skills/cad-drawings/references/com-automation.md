@@ -168,3 +168,84 @@ Besides AutoCAD, the following hosts expose COM automation:
 - **GstarCAD**: ProgID `GStarCAD.Application[.NN]` (version-specific); experimental support
 
 The bundled `doctor` command lists all detected hosts by querying the Windows registry. Support for non-Autodesk hosts is marked experimental; test on actual drawings before relying on it.
+
+## Editing DWG through COM via `edit` command
+
+The `edit` command edits DWG files through the CAD application using COM. The process is:
+
+1. **Pass 1 (validation)**: The original DWG is converted to DXF via COM (using the `export_dxf` method with all layouts activated), and all preconditions are checked against the DXF. Nothing is written.
+
+2. **Pass 2 (apply)**: A staged copy of the DWG is opened with `AcadSession.open(path, readonly=False)`, and each edit target is modified via `HandleToObject`, then the document is saved with `AcadSession.save_dwg`.
+
+3. **Verification**: The edited DWG is exported to a temporary DXF and fingerprinted, then compared with the original's fingerprint to confirm the changes match the plan.
+
+### Handling entity types and property mapping
+
+When setting properties on a DWG entity via COM, property names are different from DXF names. The `edit` command maps DXF-style property names to COM members automatically (see `cadlib/acad_edit.py`). For example:
+
+- DXF `layer` → COM `Layer`
+- DXF `color` → COM `color`
+- DXF `height` → COM `Height`
+- DXF `rotation` → COM `Rotation` (note: COM uses radians)
+
+If you write custom code, use the COM names directly:
+
+```python
+entity.Layer = "New-Layer"
+entity.Height = 2.5
+entity.Rotation = math.radians(45)
+```
+
+For TEXT, MTEXT, and ATTRIB entities, the width factor (`width` in DXF) maps to:
+
+- TEXT, ATTRIB: `ScaleFactor`
+- MTEXT: `Width`
+
+### Unsupported operations on DWG
+
+The `edit` command does not support `pan-viewport` on DWG sources. Panning the model view of a paper-space viewport would require the viewport to be activated and a CAD command (like `pan` or viewport scroll) to be issued, which has not been verified on real hardware. For now, ask the user to export a DXF, edit that, and convert back if viewport panning is needed.
+
+### Attribute editing
+
+Block references (INSERT) can have attributes (ATTRIB). To edit an attribute, the plan must reference the INSERT entity's handle and use `replace-text` or `set-props` on the attribute's text or properties.
+
+The `expect` block can check attributes:
+
+```json
+{
+  "expect": {
+    "type": "INSERT",
+    "attrib": {"TAG1": "old value", "TAG2": "another value"}
+  }
+}
+```
+
+### Verification of DWG edits
+
+After editing a DWG, the edited file is re-exported to DXF for verification. The report notes the DWG version the file was saved in (detected from the file header). Always read the edited file back with `find` or `dump` to get fresh handles before planning further edits.
+
+### Performance: never loop through entities via COM
+
+Every property access on a COM object is a cross-process RPC call. Looping over thousands of entities to find targets is extremely slow. Instead:
+
+1. Use `find` or `dump` to locate targets by handle (fast, in-process).
+2. Use `HandleToObject` to get the COM object for that single handle.
+3. Modify the object and move on.
+
+Example (wrong):
+
+```python
+# SLOW: hundreds of RPC calls
+for entity in doc.ModelSpace:
+    if "target text" in entity.TextString:
+        entity.TextString = "new text"
+```
+
+Example (right):
+
+```python
+# FAST: one find call + one property access
+handle = "1A5"  # from find output
+entity = doc.HandleToObject(handle)
+entity.TextString = "new text"
+```
