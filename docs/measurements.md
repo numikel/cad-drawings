@@ -35,13 +35,29 @@ Across the four previous-skill runs that used the CAD application, **all four le
 | No retry on a rejected first call | Retries classified by error code, waiting for the application to be idle |
 | Missing environment check | `doctor` reports what is available and how to install the rest; it never installs anything |
 
+## This version (first measurement, 2026-10-02)
+
+Same tasks, same machine, one run per cell, a fresh agent that reads this skill. For the tasks that read a DWG the agent was told the user agreed to use the CAD application (the agents cannot ask); the no-CAD task was given without that consent. The ground truth for the viewport question was corrected after the baseline (see below), so the inventory row is not comparable with the baseline on that point.
+
+| Task | Result | Throwaway scripts | Left behind |
+|---|---|---|---|
+| Inventory of title blocks and a word (6 places) | Correct: all 6 places, printing verdicts match the corrected ground truth, stated as geometry-based, not a plot | 0 | nothing |
+| Compare two revisions | Correct: 3 of 3 changes, no false alarms, 37 renumbered handles ignored, no cause claimed for the deleted circle | 0 | nothing |
+| Area in square metres | Correct: 21.0 and 19.0, decoy shape ignored, mm and cm told apart | 1 | nothing |
+| No CAD allowed, no cached conversion | Stopped with exit 3, asked, offered three options with a recommendation, installed nothing | 0 | nothing |
+| Update a field and give PDFs | not measured: no `plot` or `edit` command yet | | |
+
+Compared with the baseline: no leftover CAD process in any run (baseline: 4 of 4), no files next to the source, no throwaway scripts for reading tasks (baseline: 2 to 10), and the comparison that returned nothing now returns the right answer. One sample per cell, one machine.
+
+**A finding from this round.** In the first no-CAD run the agent read a conversion that an earlier, consented task had left in the shared cache, which skipped the path we wanted to test. The agent said so, and the result was still correct, but the cache is shared across tasks. We moved it aside and repeated the run (the row above). Whether a cached conversion made with consent may be reused for a task without consent is a design decision for the next phase.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
 
 ## Not yet measured
 
-- This version against the same tasks (the second half of the table above).
+- The update-and-plot task (needs the `plot` and `edit` commands).
 - Real-world drawings from outside the synthetic set.
 - Behaviour on macOS and Linux outside CI.
 - Other CAD applications that expose the same COM interface.
