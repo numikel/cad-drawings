@@ -49,6 +49,8 @@ Same tasks, same machine, one run per cell, a fresh agent that reads this skill.
 
 Compared with the baseline: no leftover CAD process in any run (baseline: 4 of 4; the update-and-plot task produced 1 of 2 PDFs on the wrong paper before, 2 of 2 on A3 now), no files next to the source, no throwaway scripts for reading tasks (baseline: 2 to 10), and the comparison that returned nothing now returns the right answer. One sample per cell, one machine.
 
+A real plot of the twisted sheet also confirmed the geometry-based `prints_on` for one object (the door attribute that the search reports as printing on both sheets appears on the printed second sheet).
+
 **A finding from this round.** In the first no-CAD run the agent read a conversion that an earlier, consented task had left in the shared cache, which skipped the path we wanted to test. The agent said so, and the result was still correct, but the cache is shared across tasks. We moved it aside and repeated the run (the row above). Whether a cached conversion made with consent may be reused for a task without consent is a design decision for the next phase.
 
 ## What the tests cover now
@@ -57,11 +59,8 @@ The repository has several hundred automated tests (run `pytest`), plus a small 
 
 ## Not yet measured
 
-- The `edit` and `plot` commands (F2 phase 2): both are implemented but not yet measured end-to-end against the same test tasks.
 - Real-world drawings from outside the synthetic set (all tests use synthetic fixtures).
 - Behaviour on macOS and Linux outside CI (rendering and conversion are portable; CAD automation is Windows-only).
 - Other CAD applications that expose the same COM interface (BricsCAD, ZWCAD, GstarCAD are detected but untested).
 
 When these are measured they will be added here with the date and the method.
-
-A real plot of the twisted sheet also confirmed the geometry-based `prints_on` for one object (the door attribute that the search reports as printing on both sheets appears on the printed second sheet).
