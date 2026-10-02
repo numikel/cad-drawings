@@ -12,6 +12,7 @@ policy documents that have to name the forbidden things (see CONTENT_ALLOWLIST).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,15 +22,39 @@ from pathlib import Path
 FORBIDDEN_STRINGS: tuple[tuple[str, bool], ...] = (
     ("C:\\Users\\", True),
     ("C:/Users/", True),
-    ("CLIENT", False),
     ("\\user\\", True),  # a home-directory path, not the author's public contact address
     ("/user/", True),
-    ("Folder", False),
-    ("XXX", False),
-    ("xxxx", True),
-    ("xxxx", True),
-    ("xxxxxx", True),
 )
+
+# Terms that identify a client or project are NOT kept in the repository (the list itself would
+# leak them). They are loaded at run time from, in this order:
+#   - the environment variable CAD_FORBIDDEN_EXTRA (one term per line or comma separated; in CI
+#     provide it as a repository secret), and
+#   - the untracked file <root>/_local/forbidden_extra.txt (one term per line).
+# A term is case-sensitive; prefix it with "i:" to ignore case. Violations of these rules are
+# reported by number only, so the term never reaches a public log.
+EXTRA_ENV = "CAD_FORBIDDEN_EXTRA"
+EXTRA_FILE = "_local/forbidden_extra.txt"
+
+
+def load_extra_strings(root: Path) -> tuple[tuple[str, bool], ...]:
+    raw: list[str] = []
+    env = os.environ.get(EXTRA_ENV, "")
+    raw.extend(part for chunk in env.splitlines() for part in chunk.split(","))
+    extra_file = root / EXTRA_FILE
+    if extra_file.is_file():
+        raw.extend(extra_file.read_text(encoding="utf-8").splitlines())
+    rules: list[tuple[str, bool]] = []
+    for item in raw:
+        item = item.strip()
+        if not item or item.startswith("#"):
+            continue
+        ignore_case = item.startswith("i:")
+        term = item[2:] if ignore_case else item
+        if term:
+            rules.append((term, ignore_case))
+    return tuple(rules)
+
 
 # Vendor files that must not be committed (matched on the file suffix, case-insensitive).
 FORBIDDEN_EXTENSIONS: tuple[str, ...] = (
@@ -103,7 +128,9 @@ def _check_name(rel: Path) -> list[Violation]:
     return found
 
 
-def _check_content(path: Path, rel: Path) -> list[Violation]:
+def _check_content(
+    path: Path, rel: Path, extra: tuple[tuple[str, bool], ...] = ()
+) -> list[Violation]:
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -117,12 +144,19 @@ def _check_content(path: Path, rel: Path) -> list[Violation]:
             hit = needle.lower() in lowered if ignore_case else needle in line
             if hit:
                 found.append(Violation(rel.as_posix(), number, f"forbidden string {needle!r}"))
+        for index, (needle, ignore_case) in enumerate(extra, start=1):
+            hit = needle.lower() in lowered if ignore_case else needle in line
+            if hit:
+                found.append(
+                    Violation(rel.as_posix(), number, f"forbidden term from local rule #{index}")
+                )
     return found
 
 
 def find_violations(root: Path) -> list[Violation]:
     """Return every violation below ``root`` (sorted by path, then line)."""
     root = root.resolve()
+    extra = load_extra_strings(root)
     found: list[Violation] = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
@@ -132,7 +166,7 @@ def find_violations(root: Path) -> list[Violation]:
             continue  # files inside a forbidden directory are reported individually
         found.extend(_check_name(rel))
         if rel.as_posix() not in CONTENT_ALLOWLIST:
-            found.extend(_check_content(path, rel))
+            found.extend(_check_content(path, rel, extra))
     return found
 
 

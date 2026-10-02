@@ -22,6 +22,8 @@ This repository will be published (MIT). Everything committed here must be safe 
 
 CI greps for forbidden strings and fails the build on a hit; run `python tests/check_forbidden.py` locally before every commit.
 
+Terms that identify a client or a source project are never written into the repository (the list would leak them). Keep them one per line in the untracked `_local/forbidden_extra.txt` (prefix `i:` for case-insensitive) and, for CI, in the repository secret `CAD_FORBIDDEN_EXTRA`; the scanner loads both and reports a hit by rule number only. Before making the repository public, scan the whole history with the same rules, not just the current tree.
+
 ## Engineering rules
 
 - **No skill edit without a failing test first** (superpowers:writing-skills). Order: baseline RED on synthetic fixtures with the old skill → implement → GREEN → close loopholes.

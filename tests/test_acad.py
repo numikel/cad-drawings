@@ -1,7 +1,7 @@
 """cadlib.acad: unit tests with fake COM objects (no CAD) and, marked ``com``, a real session.
 
 COM tests need an installed CAD application, run one at a time and only when no other CAD work
-is in progress: ``pytest -m com skills/cad-drawings/tests/test_acad.py``. Their output goes to
+is in progress: ``pytest -m com tests/test_acad.py``. Their output goes to
 ``CAD_DRAWINGS_COM_OUT`` (default: pytest's tmp path; prefer a drive other than the system one).
 """
 
