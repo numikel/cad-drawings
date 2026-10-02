@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Generate synthetic CAD test drawings (DXF) plus machine-readable ground truth.
 
 Everything produced here is invented for testing. The output is deterministic: the same

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Environment check for the cad-drawings skill. Standard library only; installs nothing.
 
     python scripts/doctor.py [--probe-com]

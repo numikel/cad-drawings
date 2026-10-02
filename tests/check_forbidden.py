@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Scan the repository for strings and files that must never be published.
 
 Standard library only. Exit code 0: clean, 1: at least one hit, 2: bad arguments.
