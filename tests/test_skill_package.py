@@ -19,10 +19,10 @@ from typing import Any
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 SCRIPTS = SKILL / "scripts"
 SKILL_MD = SKILL / "SKILL.md"
-EVALS = SKILL / "evals"
+EVALS = SKILL.parents[1] / "evals"
 
 ALLOWED_FRONTMATTER = {
     "name",

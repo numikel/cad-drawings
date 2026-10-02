@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 from cadlib import acad

@@ -1,6 +1,6 @@
 {
   "name": "cad-drawings-skills",
-  "owner": { "name": "cad-drawings contributors" },
+  "owner": { "name": "numikel", "email": "contact@michalsk.pl" },
   "description": "Agent skills for working with CAD drawings.",
   "plugins": [
     {

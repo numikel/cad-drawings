@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 SCRIPTS = SKILL / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 

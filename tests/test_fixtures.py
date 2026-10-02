@@ -27,9 +27,9 @@ import pytest
 from ezdxf.lldxf import const
 from ezdxf.tools.text import plain_mtext
 
-SKILL_DIR = Path(__file__).resolve().parents[1]
-MAKE_FIXTURES = SKILL_DIR / "evals" / "make_fixtures.py"
-CHECK_FORBIDDEN = SKILL_DIR / "tests" / "check_forbidden.py"
+SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
+MAKE_FIXTURES = SKILL_DIR.parents[1] / "evals" / "make_fixtures.py"
+CHECK_FORBIDDEN = SKILL_DIR.parents[1] / "tests" / "check_forbidden.py"
 
 RUN_SLOW = os.environ.get("CAD_DRAWINGS_RUN_SLOW") == "1"
 
@@ -785,7 +785,7 @@ def test_check_forbidden_reports_planted_items(tmp_path: Path) -> None:
 
 def test_check_forbidden_respects_exclusions_and_avoids_false_hits(tmp_path: Path) -> None:
     bad = f"{_needle(2)} {_needle(0)}\n"
-    for excluded in ("_local", ".venv", "skills/cad-drawings/evals/fixtures"):
+    for excluded in ("_local", ".venv", "evals/fixtures"):
         folder = tmp_path / excluded
         folder.mkdir(parents=True)
         (folder / "x.txt").write_text(bad, encoding="utf-8")

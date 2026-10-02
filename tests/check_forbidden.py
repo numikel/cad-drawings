@@ -3,7 +3,7 @@
 
 Standard library only. Exit code 0: clean, 1: at least one hit, 2: bad arguments.
 
-    python skills/cad-drawings/tests/check_forbidden.py [--root <repo root>]
+    python tests/check_forbidden.py [--root <repo root>]
 
 The rules come from AGENTS.md ("Forbidden in the repo"). Content checks are skipped for the
 policy documents that have to name the forbidden things (see CONTENT_ALLOWLIST).
@@ -22,7 +22,8 @@ FORBIDDEN_STRINGS: tuple[tuple[str, bool], ...] = (
     ("C:\\Users\\", True),
     ("C:/Users/", True),
     ("CLIENT", False),
-    ("user", True),
+    ("\\user\\", True),  # a home-directory path, not the author's public contact address
+    ("/user/", True),
     ("Folder", False),
     ("XXX", False),
     ("xxxx", True),
@@ -61,12 +62,10 @@ EXCLUDED_DIR_NAMES: frozenset[str] = frozenset(
     {"_local", ".venv", ".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
 )
 # Skipped entirely, by path relative to the root (POSIX separators).
-EXCLUDED_REL_PATHS: tuple[str, ...] = ("skills/cad-drawings/evals/fixtures",)
+EXCLUDED_REL_PATHS: tuple[str, ...] = ("evals/fixtures",)
 
 # Policy documents that describe the forbidden things; file names/extensions are still checked.
-CONTENT_ALLOWLIST: frozenset[str] = frozenset(
-    {"AGENTS.md", "skills/cad-drawings/tests/check_forbidden.py"}
-)
+CONTENT_ALLOWLIST: frozenset[str] = frozenset({"AGENTS.md", "tests/check_forbidden.py"})
 
 BINARY_SNIFF_BYTES = 8192
 
@@ -138,7 +137,7 @@ def find_violations(root: Path) -> list[Violation]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    default_root = Path(__file__).resolve().parents[3]
+    default_root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser(description="Fail on forbidden strings and vendor files.")
     parser.add_argument("--root", type=Path, default=default_root, help="repository root")
     args = parser.parse_args(argv)

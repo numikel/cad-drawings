@@ -15,7 +15,7 @@ import pytest
 from PIL import Image
 from typing_extensions import Self
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 from cadlib import render

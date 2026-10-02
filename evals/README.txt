@@ -7,7 +7,7 @@ drawing is ever committed: the DXF files are generated on demand into evals/fixt
 
 Regenerate
 ----------
-    python skills/cad-drawings/evals/make_fixtures.py --out <dir> [--large]
+    python evals/make_fixtures.py --out <dir> [--large]
 
 Requires ezdxf (>= 1.4.4). Without --out the files go to evals/fixtures/ next to the script.
 --large also writes plan_large.dxf (about 30 000 entities, roughly 5 MB, a few seconds).
@@ -38,7 +38,7 @@ changes.json  The v1 -> v2 comparison: "real_changes", declared "noise", "entity
 
 Tests
 -----
-    python -m pytest skills/cad-drawings/tests -q
+    python -m pytest tests -q
 
 tests/test_fixtures.py regenerates everything into a temporary directory, re-reads the files
 and checks every claim in truth.json. The large variant is marked "slow" and skipped unless

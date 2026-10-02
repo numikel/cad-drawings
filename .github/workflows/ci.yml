@@ -43,9 +43,9 @@ jobs:
       - name: Format check
         run: python -m ruff format --check skills
       - name: Forbidden strings and files
-        run: python skills/cad-drawings/tests/check_forbidden.py
+        run: python tests/check_forbidden.py
       - name: Tests (COM tests are deselected by pyproject addopts)
-        run: python -m pytest skills/cad-drawings/tests -q
+        run: python -m pytest tests -q
 
   validate-skill:
     name: validate skill (reference validator)
@@ -102,7 +102,7 @@ jobs:
           CAD_DRAWINGS_RUNS: ${{ runner.temp }}/runs
         run: |
           PY="$RUNNER_TEMP/required/bin/python"
-          "$PY" skills/cad-drawings/evals/make_fixtures.py --out "$RUNNER_TEMP/fixtures"
+          "$PY" evals/make_fixtures.py --out "$RUNNER_TEMP/fixtures"
           "$PY" skills/cad-drawings/scripts/cad.py render "$RUNNER_TEMP/fixtures/sheet_set.dxf"             --backend ezdxf > "$RUNNER_TEMP/render.json"
           "$PY" - <<'PY'
           import json
@@ -148,4 +148,4 @@ jobs:
       - name: Slow tests
         env:
           CAD_DRAWINGS_RUN_SLOW: "1"
-        run: python -m pytest skills/cad-drawings/tests -q -m "slow and not com"
+        run: python -m pytest tests -q -m "slow and not com"

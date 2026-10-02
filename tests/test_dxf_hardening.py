@@ -13,7 +13,7 @@ import ezdxf
 import pytest
 from jsonschema import Draft202012Validator
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 from cadlib import diffing, dxf, util

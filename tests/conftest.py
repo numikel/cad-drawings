@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-SKILL_DIR = Path(__file__).resolve().parents[1]
-MAKE_FIXTURES = SKILL_DIR / "evals" / "make_fixtures.py"
+SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
+MAKE_FIXTURES = SKILL_DIR.parents[1] / "evals" / "make_fixtures.py"
 
 
 def _load_generator() -> Any:

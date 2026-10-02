@@ -5,10 +5,10 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Agent Skill](https://img.shields.io/badge/agent%20skill-agentskills.io-informational.svg)](https://agentskills.io/specification)
-<!-- Add after the first public release: CI status badge, skills.sh badge (https://skills.sh/b/OWNER/cad-drawings) -->
+<!-- Add after the first public release: CI status badge, skills.sh badge (https://skills.sh/b/numikel/cad-drawings) -->
 
 ```bash
-npx skills add OWNER/cad-drawings
+npx skills add numikel/cad-drawings
 ```
 
 Works on Windows, macOS and Linux. No CAD software needed to read DXF. For DWG you need a converter, or you let the skill use your own AutoCAD on Windows when you say so.
@@ -23,10 +23,10 @@ Works on Windows, macOS and Linux. No CAD software needed to read DXF. For DWG y
 
 ```bash
 # Any agent the `skills` installer supports (Claude Code, Codex, Cursor, Copilot, Gemini CLI, ...)
-npx skills add OWNER/cad-drawings
+npx skills add numikel/cad-drawings
 
 # Claude Code plugin
-/plugin marketplace add OWNER/cad-drawings
+/plugin marketplace add numikel/cad-drawings
 /plugin install cad-drawings@cad-drawings-skills
 ```
 
@@ -170,7 +170,7 @@ Developed and tested on Windows 11 with AutoCAD 2024. The automated tests run on
 
 ## Contributing
 
-Read [AGENTS.md](AGENTS.md) first: the project follows a publication profile (generic content, cross-platform, permissive licences, no client data or vendor files). Run `python skills/cad-drawings/tests/check_forbidden.py` and `pytest` before a pull request. Changes to the skill text start with a failing test or measurement.
+Read [AGENTS.md](AGENTS.md) first: the project follows a publication profile (generic content, cross-platform, permissive licences, no client data or vendor files). Run `python tests/check_forbidden.py` and `pytest` before a pull request. Changes to the skill text start with a failing test or measurement.
 
 ## Licence and credits
 

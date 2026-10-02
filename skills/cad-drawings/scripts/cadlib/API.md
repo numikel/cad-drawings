@@ -9,7 +9,7 @@ Written by the main context before the tracks start. **Code against this documen
 - Never loop over entities through COM. Reading/searching/diffing uses ezdxf on DXF.
 - Large data goes to files in the run directory; `Result.summary` holds a few numbers only.
 - Generic: no client names, layer names, paths or jargon in code, comments, tests or docstrings (see `AGENTS.md`). Tests use the synthetic fixtures from `evals/make_fixtures.py` (generate into `tmp_path`).
-- Lint/format/test with `.venv/Scripts/python.exe -m ruff check --fix skills && ... -m ruff format skills && ... -m pytest skills/cad-drawings/tests -q -p no:cacheprovider`; also `python skills/cad-drawings/tests/check_forbidden.py`.
+- Lint/format/test with `.venv/Scripts/python.exe -m ruff check --fix skills && ... -m ruff format skills && ... -m pytest tests -q -p no:cacheprovider`; also `python tests/check_forbidden.py`.
 
 ## Ownership (file scope — write only your own files)
 

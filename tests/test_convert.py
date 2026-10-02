@@ -16,9 +16,9 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
-sys.path.insert(0, str(SKILL / "evals"))
+sys.path.insert(0, str(SKILL.parents[1] / "evals"))
 
 import cadlib
 import make_fixtures

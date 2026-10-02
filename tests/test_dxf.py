@@ -16,7 +16,7 @@ from typing import Any
 import ezdxf
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
+SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 from cadlib import diffing, dxf
@@ -704,7 +704,7 @@ LARGE_BUDGET_S = {"info": 8.0, "find": 8.0, "fingerprint": 20.0}
 )
 def test_large_fixture_performance(tmp_path: Path, runs: Path) -> None:
     spec = importlib.util.spec_from_file_location(
-        "cad_make_fixtures_large", SKILL / "evals" / "make_fixtures.py"
+        "cad_make_fixtures_large", SKILL.parents[1] / "evals" / "make_fixtures.py"
     )
     assert spec is not None and spec.loader is not None
     gen = importlib.util.module_from_spec(spec)
