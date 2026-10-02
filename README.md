@@ -204,6 +204,8 @@ Developed and tested on Windows 11 with AutoCAD 2024. The automated tests run on
 
 Read [AGENTS.md](AGENTS.md) first: the project follows a publication profile (generic content, cross-platform, permissive licences, no client data or vendor files). Run `python tests/check_forbidden.py` and `pytest` before a pull request. Changes to the skill text start with a failing test or measurement.
 
+Found a security problem? Please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+
 ## Licence and credits
 
 MIT, see [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Built on [ezdxf](https://github.com/mozman/ezdxf) (MIT) and [pypdfium2](https://github.com/pypdfium2-team/pypdfium2) (Apache-2.0 / BSD-3).
