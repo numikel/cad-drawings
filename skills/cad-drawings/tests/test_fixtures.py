@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 import re
 import subprocess
@@ -359,9 +360,8 @@ def test_fire_prints_on_matches_viewport_windows(truth: dict[str, Any], load: An
         vp = entity_by_handle(doc, lay["viewports"][0]["handle"])
         scale = vp.dxf.view_height / vp.dxf.height
         half = (vp.dxf.width * scale / 2, vp.dxf.height * scale / 2)
-        if round(vp.dxf.view_twist_angle) % 180 == 90:
-            half = (half[1], half[0])
-        windows[lay["name"]] = (vp.dxf.view_center_point, half)
+        theta = math.radians(vp.dxf.view_twist_angle)
+        windows[lay["name"]] = (vp.dxf.view_center_point, half, theta)
     frozen = set(claims["globally_frozen_layers"])
     expected = {}
     for occ in claims["search"]["occurrences"]:
@@ -374,10 +374,12 @@ def test_fire_prints_on_matches_viewport_windows(truth: dict[str, Any], load: An
             expected[occ["id"]] = []
         else:
             x, y = ent.dxf.insert.x, ent.dxf.insert.y
+            # model point -> display coordinates: DCS = R(+twist) * WCS (target at the origin)
             expected[occ["id"]] = [
                 name
-                for name, (c, h) in windows.items()
-                if abs(x - c.x) <= h[0] and abs(y - c.y) <= h[1]
+                for name, (c, h, th) in windows.items()
+                if abs(x * math.cos(th) - y * math.sin(th) - c.x) <= h[0]
+                and abs(x * math.sin(th) + y * math.cos(th) - c.y) <= h[1]
             ]
     assert {o["id"]: o["prints_on"] for o in claims["search"]["occurrences"]} == expected
     # guard against a vacuous check: both outcomes occur

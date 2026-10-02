@@ -52,12 +52,19 @@ Every command that writes anything calls `RunContext.create`; a command never ov
 ## `convert.py` (T1) — command `convert`
 ```python
 class Converter(Protocol):
-    name: str                       # "com" | "oda" | "libredwg"
-    approximate: bool               # True for libredwg
+    name: str  # "com" | "oda" | "libredwg"
+    approximate: bool  # True for libredwg
+
     def available(self) -> tuple[bool, str]: ...
-    def convert(self, src: Path, dst: Path, fmt: str, ctx: RunContext) -> list[str]: ...  # returns warnings; fmt: dxf|dwg
-def detect_converters() -> list[Converter]: ...         # priority: com, oda, libredwg
-def convert(src: Path, dst: Path, fmt: str, *, prefer: str | None = None, ctx: RunContext) -> tuple[Converter, list[str]]: ...
+    def convert(
+        self, src: Path, dst: Path, fmt: str, ctx: RunContext
+    ) -> list[str]: ...  # returns warnings; fmt: dxf|dwg
+
+
+def detect_converters() -> list[Converter]: ...  # priority: com, oda, libredwg
+def convert(
+    src: Path, dst: Path, fmt: str, *, prefer: str | None = None, ctx: RunContext
+) -> tuple[Converter, list[str]]: ...
 ```
 - COM backend delegates to `cadlib.acad` (T2) via `from .acad import export_dxf` imported lazily; **do not run COM in T1 tests** (T1 uses a fake). Success = output file exists AND is newer than the start of the call AND (for DXF) opens with `ezdxf.readfile(..., recover=True)`; never trust exit codes or `ezdxf.addons.odafc` silence.
 - ODA: detect `ODAFileConverter` via PATH, `%ProgramFiles%\ODA\*\ODAFileConverter.exe` (versioned directory), `/usr/bin`, `/Applications/ODAFileConverter.app/...`. Linux needs Xvfb (report it); macOS opens a window (warn).
@@ -126,3 +133,41 @@ def retry_expr(expr: Callable[[], T], **kw) -> T: ...
 
 ## Not in F1
 `plot`, `edit`, `measure`, `register`, `qa` (F2/F3). `edit-spec.schema.json` exists for F2.
+
+## As built (F1 addenda; these supersede the sketches above where they differ)
+
+### runs.py / convert.py
+```python
+def runs_base(base: Path | None = None) -> Path
+class RunContext:
+    command: str
+    def subdir(self, name: str) -> Path            # directory inside the run dir; register files via path()
+    def rel(self, path: Path) -> str | None
+    def bind(self, result: Result) -> None         # sets Result.run_dir and Result.log
+    def finish(self, state: str = "done") -> None  # final status.json; state = done | failed
+def pid_alive(pid: int) -> bool                    # portable; os.kill(pid, 0) would kill on Windows
+def cache_get(sha1: str, kind: str, *, base: Path | None = None) -> Path | None   # treat as read-only
+def cache_put(sha1: str, kind: str, src: Path, *, base: Path | None = None) -> Path
+
+class Converter(Protocol):
+    name: str; approximate: bool
+    @property
+    def formats(self) -> tuple[str, ...]           # output formats: com ("dxf",), oda ("dxf","dwg"), libredwg per tool
+    def available(self) -> tuple[bool, str]
+    def convert(self, src: Path, dst: Path, fmt: str, ctx: RunContext) -> list[str]
+def detect_converters(timeout: float = 240.0) -> list[Converter]
+def convert(src, dst, fmt, *, prefer=None, ctx, converters=None, timeout=240.0) -> tuple[Converter, list[str]]
+@dataclass
+class DxfResult:                                   # path, backend, approximate, cached, warnings
+def ensure_dxf(src: Path, ctx: RunContext, *, prefer=None, base=None, converters=None, timeout=240.0) -> DxfResult
+```
+`prefer` other than `auto` uses only that backend (no silent fallback); in `auto` any backend failure falls through with a warning and, if all fail with the same exit code, that code is kept. Every artifact must be newer than its source (2 s tolerance for coarse file systems). `.dxf` -> `.dxf` without `--out` is a no-op without a run directory. A missing input file is `FILE_NOT_FOUND` with `ExitCode.BAD_ARGS`. Deletion by `cleanup` only for files listed in the run manifest, one file at a time, and `--yes` is required.
+
+### doctor
+`summary.capabilities`: `read_dxf`, `read_dwg`, `convert` (available only when both directions work, otherwise degraded), `render`, `pdf_to_png`; `edit_dwg` and `plot_deliverable` are `not_implemented` until F2. `summary.cad_progids` (strings) and `summary.cad_installs` (`{product, version, key}`). Exit code is 0 with the matrix; 3 only when Python itself is too old.
+
+### acad.py
+`export_dxf(...)` and `plot_layout_pdf(...)` return `list[str]` warnings; `export_dxf` has `activate_layouts=True` (every layout is activated through CTAB before SaveAs and the original tab restored; without it COM-exported DXF reports viewport `status 0`). `save_dwg(doc, dst, version)` closes the document. `plot_layout_pdf` plots straight to `dst` (must not exist: `DEST_EXISTS`), deletes a half-written file on failure and always returns `VIEWER_WARNING` (the PDF plotter may open the user's default PDF viewer; COM cannot switch this off). Error codes in use: `DOC_OPEN_BY_USER`, `DOC_ALREADY_OPEN`, `COM_TRANSIENT`, `COM_ERROR`, `PLOT_FAILED`, `PLOT_BAD_OUTPUT`, `LAYOUT_NOT_FOUND`, `NOT_FOUND`, `NO_BACKEND`, `NO_INSTANCE`, `PID_UNAVAILABLE`, `DEST_EXISTS`, `STALE_OUTPUT`, `LOCKED`, `DISK_LOW`, `EXISTS`, `CONFIRM_REQUIRED`, `FILE_NOT_FOUND`.
+
+### Viewport geometry (verified against a real CAD plot)
+The DXF `view_center_point` is in display coordinates: `DCS = R(+twist) * (WCS - target)`, twist counter-clockwise in degrees, target = origin for plan views. A model point lies inside a viewport window when its DCS image is within `size * view_height / height / 2` of the stored centre on each axis. `prints_on` is geometry-based, not a plot.

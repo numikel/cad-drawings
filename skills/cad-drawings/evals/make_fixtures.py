@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 from collections.abc import Iterator
@@ -281,12 +282,20 @@ def _add_sheet(layout: Any, sheet: dict[str, Any], vp_id: int, reg: _Registry) -
             "value_handle": value.dxf.handle,
             "value": sheet["fields"][field],
         }
+    # The file stores the view centre in display coordinates (DCS), which the twist rotates:
+    # DCS = R(+twist) * (WCS - target), target = origin. Verified against a real CAD plot.
+    wcs_center = (4000.0, 3250.0)
+    theta = math.radians(float(sheet["twist"]))
+    dcs_center = (
+        wcs_center[0] * math.cos(theta) - wcs_center[1] * math.sin(theta),
+        wcs_center[0] * math.sin(theta) + wcs_center[1] * math.cos(theta),
+    )
     vp = reg.add(
         f"{name}.viewport",
         layout.add_viewport(
             center=(147.5, 148.5),
             size=(275.0, 267.0),
-            view_center_point=(4000.0, 3250.0),
+            view_center_point=dcs_center,
             view_height=6675.0,
         ),
     )
@@ -304,7 +313,9 @@ def _add_sheet(layout: Any, sheet: dict[str, Any], vp_id: int, reg: _Registry) -
                 "id": vp_id,
                 "center": [147.5, 148.5],
                 "size": [275.0, 267.0],
-                "view_center": [4000.0, 3250.0],
+                "view_center": [round(dcs_center[0], 6), round(dcs_center[1], 6)],
+                "view_center_is_dcs": True,
+                "view_center_wcs": list(wcs_center),
                 "view_height": 6675.0,
                 "twist_deg": float(sheet["twist"]),
                 "frozen_layers": list(sheet["freeze"]),

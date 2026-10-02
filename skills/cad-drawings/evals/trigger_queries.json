@@ -1,0 +1,102 @@
+[
+  {
+    "query": "the room areas I pull from floorplan_ground.dwg come out as 19000000, how do I convert the area on this plan to square metres?",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "my architect sent rev_B.dwg and rev_C.dwg of the same floor. what changed between these two revisions of the drawing? ignore stuff that only differs because it was re-saved",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "the title block date is wrong on every sheet in site_set.dwg. fix it to 2026-10-01 and send me a pdf of each sheet",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "my python script drives AutoCAD through win32com and keeps dying with 'Call was rejected by callee' once I loop over the blocks. help",
+    "should_trigger": true,
+    "split": "validation"
+  },
+  {
+    "query": "find every place the word EXTINGUISHER appears in this drawing, even in hidden layers or inside blocks nobody uses",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "got a .dwg from a client, I'm on a linux laptop with no autocad. whats the easiest way to see a png of each layout?",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "there's a note 'SEE DETAIL 4' in model space of hall.dxf and I can't see it on sheet A3-02. will it print or not?",
+    "should_trigger": true,
+    "split": "validation"
+  },
+  {
+    "query": "need to bump the revision letter in the title block attribute across 30 drawings in ~/projects/block-c/ without opening them one by one",
+    "should_trigger": true,
+    "split": "validation"
+  },
+  {
+    "query": "list the xrefs in plan.dxf and tell me which ones point to files that don't exist anymore",
+    "should_trigger": true,
+    "split": "train"
+  },
+  {
+    "query": "everything in this drawing looks 25.4 times too small after I inserted it into the site plan. is it a units mismatch? check what the file says",
+    "should_trigger": true,
+    "split": "validation"
+  },
+  {
+    "query": "Our Revit model has the wrong level heights on floors 3 to 5. How do I fix them with a Dynamo script?",
+    "should_trigger": false,
+    "split": "train"
+  },
+  {
+    "query": "In SketchUp my group keeps merging with the ground plane when I push-pull. how do I stop that?",
+    "should_trigger": false,
+    "split": "train"
+  },
+  {
+    "query": "I have a scanned invoice as a PDF, how can I replace the total amount on page 2 and keep the layout?",
+    "should_trigger": false,
+    "split": "validation"
+  },
+  {
+    "query": "In Figma, how do I make a floor plan style drawing snap to a 10px grid and export each frame as svg?",
+    "should_trigger": false,
+    "split": "train"
+  },
+  {
+    "query": "convert logo.svg to a 512x512 png with a transparent background from the command line",
+    "should_trigger": false,
+    "split": "validation"
+  },
+  {
+    "query": "my stl for the 3d printer has holes and the slicer complains about non-manifold edges. what's the best way to repair it?",
+    "should_trigger": false,
+    "split": "train"
+  },
+  {
+    "query": "how do I check that the solder mask layer in my gerber files lines up with the copper layer before I send the board to fabrication?",
+    "should_trigger": false,
+    "split": "validation"
+  },
+  {
+    "query": "draw a simple floor plan with rectangles and labels in matplotlib and save it as a high resolution png",
+    "should_trigger": false,
+    "split": "train"
+  },
+  {
+    "query": "I'm planning a 60 square metre flat, any tips on where to put the kitchen so it doesn't feel cramped? no drawing yet, just thinking",
+    "should_trigger": false,
+    "split": "validation"
+  },
+  {
+    "query": "which is better for a small architecture studio, buying AutoCAD LT or BricsCAD, and what are the licence costs per year?",
+    "should_trigger": false,
+    "split": "train"
+  }
+]

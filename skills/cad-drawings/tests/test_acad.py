@@ -1,0 +1,1234 @@
+"""cadlib.acad: unit tests with fake COM objects (no CAD) and, marked ``com``, a real session.
+
+COM tests need an installed CAD application, run one at a time and only when no other CAD work
+is in progress: ``pytest -m com skills/cad-drawings/tests/test_acad.py``. Their output goes to
+``CAD_DRAWINGS_COM_OUT`` (default: pytest's tmp path; prefer a drive other than the system one).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+SKILL = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(SKILL / "scripts"))
+
+from cadlib import acad
+from cadlib.result import CadError, ExitCode
+
+# --- fakes -----------------------------------------------------------------------------------
+
+
+class FakeComError(Exception):
+    """Duck-typed pywintypes.com_error: (hresult, text, excepinfo, argerr)."""
+
+    def __init__(self, hresult: int, text: str = "", excepinfo: tuple[Any, ...] | None = None):
+        super().__init__(hresult, text, excepinfo, None)
+        self.hresult = hresult
+
+
+class Clock:
+    """Deterministic time: sleeping advances the clock."""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+        self.sleeps: list[float] = []
+
+    def now(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.t += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    c = Clock()
+    monkeypatch.setattr(acad, "_now", c.now)
+    monkeypatch.setattr(acad, "_sleep", c.sleep)
+    return c
+
+
+@pytest.fixture(autouse=True)
+def no_disk_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(acad, "preflight_disk", lambda path, min_gb=5.0: None)
+
+
+class FakeState:
+    IsQuiescent = True
+
+
+class FakeRawDoc:
+    """The COM document surface acad.py touches."""
+
+    def __init__(self, path: str, events: list[str] | None = None) -> None:
+        self.FullName = path
+        self.events = events if events is not None else []
+        self.vars: dict[str, Any] = {
+            "ISAVEBAK": 1,
+            "ISAVEPERCENT": 50,
+            "BACKGROUNDPLOT": 2,
+            "CTAB": "Model",
+            "FILEDIA": 1,
+        }
+        self.ctab_history: list[Any] = []
+        self.layouts = SimpleNamespace(Count=0, Item=lambda i: None)
+        self.Plot = SimpleNamespace(QuietErrorMode=False, PlotToFile=lambda p: False)
+        self.saveas_writes: str | None = ""  # content SaveAs writes; None = writes nothing
+        self.close_error: Exception | None = None
+        self.closed = False
+
+    @property
+    def Layouts(self) -> Any:
+        return self.layouts
+
+    def GetVariable(self, name: str) -> Any:
+        return self.vars[name]
+
+    def SetVariable(self, name: str, value: Any) -> None:
+        if name == "CTAB":
+            self.ctab_history.append(value)
+        self.vars[name] = value
+
+    def Activate(self) -> None:
+        self.events.append("activate")
+
+    def SaveAs(self, path: str, kind: int) -> None:
+        self.events.append(f"saveas:{kind}")
+        if self.saveas_writes is not None:
+            Path(path).write_text(self.saveas_writes, encoding="utf-8")
+
+    def Close(self, save: bool) -> None:
+        assert save is False
+        if self.close_error:
+            raise self.close_error
+        self.closed = True
+        self.events.append("doc.close")
+
+
+class FakeDocuments:
+    def __init__(self, app: FakeApp) -> None:
+        self.app = app
+        self.items: list[FakeRawDoc] = []
+        self.next_open: FakeRawDoc | None = None
+
+    @property
+    def Count(self) -> int:
+        return len(self.items)
+
+    def Item(self, index: int) -> FakeRawDoc:
+        return self.items[index]
+
+    def Open(self, path: str, readonly: bool) -> FakeRawDoc:
+        assert readonly is True
+        raw = self.next_open or FakeRawDoc(path, self.app.events)
+        raw.FullName = path
+        raw.events = self.app.events
+        self.items.append(raw)
+        for suffix in self.app.create_on_open:
+            Path(path).with_suffix(suffix).write_text("lock", encoding="utf-8")
+        return raw
+
+
+class FakeApp:
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.Documents = FakeDocuments(self)
+        self.HWND = 1
+        self.Visible: Any = None
+        self.create_on_open: list[str] = []
+        self.quit_error: Exception | None = None
+
+    def GetAcadState(self) -> FakeState:
+        return FakeState()
+
+    def Quit(self) -> None:
+        self.events.append("quit")
+        if self.quit_error:
+            raise self.quit_error
+
+
+def make_session(app: FakeApp | None = None, **kw: Any) -> acad.AcadSession:
+    kw.setdefault("pid", 100)
+    kw.setdefault("progid", "AutoCAD.Application.24.3")
+    kw.setdefault("owned", True)
+    return acad.AcadSession(app or FakeApp(), **kw)
+
+
+# --- classification and retry ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("exc", "kind"),
+    [
+        (FakeComError(-2147418111), "transient"),
+        (FakeComError(0x80010001), "transient"),  # unsigned form of the same HRESULT
+        (FakeComError(-2147417846), "transient"),
+        (FakeComError(-2147352567, "x", (0, "src", "d", None, 0, -2147418111)), "transient"),
+        (
+            FakeComError(-2147352567, "localized text", (1, "src", "d", None, 0, -2145320924)),
+            "permanent",
+        ),
+        (FakeComError(-2147352565), "permanent"),
+        (AttributeError("<unknown>.Quit"), "transient"),
+        (AttributeError("'X' object has no attribute 'y'"), "other"),
+        (ValueError("boom"), "other"),
+        (CadError("X", "y"), "other"),
+    ],
+)
+def test_classify_by_hresult_not_text(exc: BaseException, kind: str) -> None:
+    assert acad.classify(exc) == kind
+
+
+def test_classify_ignores_message_text() -> None:
+    # Same words as a transient error but a different HRESULT: must stay permanent.
+    assert acad.classify(FakeComError(-2147352567, "Call was rejected by callee")) == "permanent"
+
+
+def test_retry_recovers_from_transient(clock: Clock) -> None:
+    calls = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) < 3:
+            raise FakeComError(-2147418111)
+        return "ok"
+
+    assert acad.retry(flaky) == "ok"
+    assert clock.sleeps == [0.4, 0.8]
+
+
+def test_retry_backoff_is_capped_and_exhaustion_is_transient_error(clock: Clock) -> None:
+    def always() -> None:
+        raise AttributeError("<unknown>.Item")
+
+    with pytest.raises(CadError) as info:
+        acad.retry(always, tries=9, base_delay=0.4, max_delay=5.0)
+    assert info.value.code == "COM_TRANSIENT"
+    assert info.value.exit_code == ExitCode.BUSY
+    assert clock.sleeps == [0.4, 0.8, 1.6, 3.2, 5.0, 5.0, 5.0, 5.0]  # 9 tries, 8 waits
+
+
+def test_retry_permanent_raises_at_once_with_codes(clock: Clock) -> None:
+    calls = []
+
+    def bad() -> None:
+        calls.append(1)
+        raise FakeComError(-2147352567, "msg", (1, "AutoCAD", "d", None, 0, -2145320924))
+
+    with pytest.raises(acad.ComError) as info:
+        acad.retry(bad)
+    assert len(calls) == 1 and not clock.sleeps
+    err = info.value
+    assert err.code == "COM_ERROR" and err.hresult == -2147352567 and err.scode == -2145320924
+    assert "0x80020009" in err.message and "0x" in err.message
+
+
+def test_retry_does_not_wrap_non_com_errors(clock: Clock) -> None:
+    with pytest.raises(ZeroDivisionError):
+        acad.retry(lambda: 1 / 0)
+    assert not clock.sleeps
+
+
+def test_retry_expr_evaluates_the_whole_expression(clock: Clock) -> None:
+    state = {"ready": False, "reads": 0}
+
+    class Blocks:
+        def Item(self, i: int) -> int:
+            return i * 2
+
+    class Doc:
+        @property
+        def Blocks(self) -> Blocks:
+            state["reads"] += 1
+            if state["reads"] < 3:
+                raise FakeComError(-2147418111)
+            return Blocks()
+
+    doc = Doc()
+    assert acad.retry_expr(lambda: doc.Blocks.Item(4)) == 8
+    assert state["reads"] == 3
+
+
+def test_retry_passes_args_and_kwargs(clock: Clock) -> None:
+    assert acad.retry(lambda a, b=0: a + b, 1, b=2) == 3
+
+
+def test_backoff_delay() -> None:
+    assert [acad.backoff_delay(n, 0.4, 5.0) for n in range(6)] == [0.4, 0.8, 1.6, 3.2, 5.0, 5.0]
+
+
+# --- platform and discovery -------------------------------------------------------------------
+
+
+def test_com_raises_missing_dependency_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "linux")
+    with pytest.raises(CadError) as info:
+        acad._com()
+    assert info.value.code == "MISSING_DEPENDENCY"
+    assert info.value.exit_code == ExitCode.MISSING_DEPENDENCY
+
+
+def test_com_raises_missing_dependency_without_pywin32(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    for name in ("pythoncom", "pywintypes", "win32com", "win32com.client", "win32process"):
+        monkeypatch.setitem(sys.modules, name, None)  # import raises ImportError
+    with pytest.raises(CadError) as info:
+        acad._com()
+    assert info.value.code == "MISSING_DEPENDENCY" and "pywin32" in info.value.message
+
+
+def test_start_off_windows_is_a_clean_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "darwin")
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start()
+    assert info.value.exit_code == ExitCode.MISSING_DEPENDENCY
+
+
+def test_module_imports_without_any_win32_module(tmp_path: Path) -> None:
+    script = tmp_path / "import_check.py"
+    script.write_text(
+        "import sys\n"
+        "for m in ('pythoncom', 'pywintypes', 'win32com', 'win32com.client', "
+        "'win32process', 'winreg'):\n"
+        "    sys.modules[m] = None\n"
+        "import cadlib.acad as a\n"
+        "assert a.discover_progids()\n"
+        "try:\n"
+        "    a._com()\n"
+        "except a.CadError as e:\n"
+        "    print(e.code)\n",
+        encoding="utf-8",
+    )
+    env = {**os.environ, "PYTHONPATH": str(SKILL / "scripts")}
+    out = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, env=env, check=False
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "MISSING_DEPENDENCY"
+
+
+def test_discover_progids_orders_versions_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [
+        "AutoCAD.Application.23",
+        "Other.Thing",
+        "AutoCAD.Application.24.3",
+        "AutoCAD.Application.24",
+        "AutoCAD.Application.9",
+        "AutoCAD.Application",
+    ]
+
+    class Key:
+        def __enter__(self) -> Key:  # noqa: PYI034
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+    def enum_key(_root: Key, index: int) -> str:
+        if index >= len(names):
+            raise OSError
+        return names[index]
+
+    fake = SimpleNamespace(HKEY_CLASSES_ROOT=0, OpenKey=lambda *a: Key(), EnumKey=enum_key)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setitem(sys.modules, "winreg", fake)
+    result = acad.discover_progids()
+    assert result[:4] == [
+        "AutoCAD.Application.24.3",
+        "AutoCAD.Application.24",
+        "AutoCAD.Application.23",
+        "AutoCAD.Application.9",
+    ]
+    assert result[4:] == [
+        "AutoCAD.Application",
+        "BricscadApp.AcadApplication",
+        "ZWCAD.Application",
+        "GStarCAD.Application",
+    ]
+
+
+def test_experimental_hosts() -> None:
+    assert not acad.is_experimental("AutoCAD.Application.24.3")
+    assert acad.is_experimental("ZWCAD.Application")
+    assert acad._image_for("BricscadApp.AcadApplication") == "bricscad.exe"
+
+
+# --- start: PID attribution ----------------------------------------------------------------------
+
+
+class LockProbe:
+    def __init__(self) -> None:
+        self.entered = 0
+        self.exited = 0
+
+    def __call__(self) -> contextlib.AbstractContextManager[None]:
+        probe = self
+
+        @contextlib.contextmanager
+        def cm() -> Iterator[None]:
+            probe.entered += 1
+            try:
+                yield
+            finally:
+                probe.exited += 1
+
+        return cm()
+
+
+@pytest.fixture
+def start_env(monkeypatch: pytest.MonkeyPatch, clock: Clock) -> SimpleNamespace:
+    env = SimpleNamespace(
+        app=FakeApp(),
+        lock=LockProbe(),
+        before={1},
+        after={1, 2},
+        owner=None,
+        created=[],
+    )
+    monkeypatch.setattr(acad, "_com", lambda: SimpleNamespace())
+    monkeypatch.setattr(acad, "_com_lock", env.lock)
+    monkeypatch.setattr(acad, "PROGIDS", ["AutoCAD.Application.24.3", "AutoCAD.Application"])
+    calls = {"n": 0}
+
+    def list_pids(image: str) -> set[int]:
+        calls["n"] += 1
+        return set(env.before) if not env.created else set(env.after)
+
+    def create(progid: str) -> tuple[Any, Any]:
+        env.created.append(progid)
+        return env.app, None
+
+    monkeypatch.setattr(acad, "_list_pids", list_pids)
+    monkeypatch.setattr(acad, "_create_app", create)
+    monkeypatch.setattr(acad, "_app_pid", lambda app: env.owner)
+    return env
+
+
+def test_start_attributes_the_new_pid(start_env: SimpleNamespace) -> None:
+    session = acad.AcadSession.start(timeout=30)
+    assert session.pid == 2 and session.owned
+    assert start_env.created == ["AutoCAD.Application.24.3"]
+    assert start_env.app.Visible is False  # never visible unless asked
+    assert start_env.lock.entered == 1 and start_env.lock.exited == 0
+
+
+def test_start_prefers_window_owner_among_several_new_pids(start_env: SimpleNamespace) -> None:
+    start_env.after = {1, 2, 3}
+    start_env.owner = 3
+    assert acad.AcadSession.start(timeout=30).pid == 3
+
+
+def test_start_refuses_when_no_new_pid(start_env: SimpleNamespace) -> None:
+    start_env.after = {1}  # nothing new: an already running instance was reused
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    assert info.value.code == "BUSY" and info.value.exit_code == ExitCode.BUSY
+    assert "Quit" not in start_env.app.events and "quit" not in start_env.app.events
+    assert start_env.lock.exited == 1  # lock released on refusal
+
+
+def test_start_refuses_when_window_belongs_to_a_foreign_process(
+    start_env: SimpleNamespace,
+) -> None:
+    start_env.owner = 1  # the window we got is owned by the pre-existing process
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    assert info.value.exit_code == ExitCode.BUSY
+    assert "quit" not in start_env.app.events
+
+
+def test_start_refuses_ambiguous_attribution(start_env: SimpleNamespace) -> None:
+    start_env.after = {1, 2, 3}
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    assert info.value.code == "BUSY"
+
+
+def test_start_tries_next_progid_and_marks_experimental(
+    start_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(acad, "PROGIDS", ["Broken.Application", "ZWCAD.Application"])
+    original = acad._create_app
+
+    def create(progid: str) -> tuple[Any, Any]:
+        if progid == "Broken.Application":
+            raise FakeComError(-2147221005)
+        return original(progid)
+
+    monkeypatch.setattr(acad, "_create_app", create)
+    session = acad.AcadSession.start(timeout=30)
+    assert session.progid == "ZWCAD.Application"
+    assert any("experimental" in w for w in session.warnings)
+
+
+def test_start_without_any_backend(
+    start_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def create(progid: str) -> tuple[Any, Any]:
+        raise FakeComError(-2147221005)
+
+    monkeypatch.setattr(acad, "_create_app", create)
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    assert info.value.code == "NO_BACKEND" and info.value.exit_code == ExitCode.MISSING_DEPENDENCY
+    assert start_env.lock.exited == 1
+
+
+def test_attach_guarded_requires_confirmation() -> None:
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.attach_guarded(confirmed=False)
+    assert info.value.exit_code == ExitCode.PRECONDITION_FAILED
+
+
+def test_attach_guarded_warns_about_unsaved_user_documents(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    dirty = FakeRawDoc("C:/work/user.dwg")
+    dirty.Saved = False  # type: ignore[attr-defined]
+    app.Documents.items.append(dirty)
+    monkeypatch.setattr(acad, "_com", lambda: SimpleNamespace())
+    monkeypatch.setattr(acad, "_com_lock", LockProbe())
+    monkeypatch.setattr(acad, "_get_active", lambda progid: (app, None))
+    monkeypatch.setattr(acad, "_app_pid", lambda a: 77)
+    session = acad.AcadSession.attach_guarded(confirmed=True)
+    assert not session.owned and session.pid == 77
+    assert any("unsaved" in w for w in session.warnings)
+    assert app.Visible is None  # never touched
+    session.quit()
+    assert "quit" not in app.events and not dirty.closed  # the user's session is left alone
+
+
+# --- quit escalation ---------------------------------------------------------------------------
+
+
+class Process:
+    """Fake process table: alive until the named event happened."""
+
+    def __init__(self, app: FakeApp, dies_on: str | None) -> None:
+        self.app = app
+        self.dies_on = dies_on
+        self.events = app.events
+
+    def alive(self, pid: int, image: str) -> bool:
+        if self.dies_on is None:
+            return True
+        return self.dies_on not in self.events
+
+    def close(self, pid: int) -> None:
+        self.events.append("close")
+
+    def kill(self, pid: int) -> None:
+        self.events.append("kill")
+
+
+def patch_process(monkeypatch: pytest.MonkeyPatch, app: FakeApp, dies_on: str | None) -> None:
+    proc = Process(app, dies_on)
+    monkeypatch.setattr(acad, "_pid_alive", proc.alive)
+    monkeypatch.setattr(acad, "_close_pid", proc.close)
+    monkeypatch.setattr(acad, "_kill_pid", proc.kill)
+
+
+@pytest.mark.parametrize(
+    ("dies_on", "expected"),
+    [
+        ("quit", ["quit"]),
+        ("close", ["quit", "close"]),
+        ("kill", ["quit", "close", "kill"]),
+    ],
+)
+def test_quit_escalation_order(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, dies_on: str, expected: list[str]
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, dies_on)
+    session = make_session(app)
+    session.quit(timeout=40)
+    assert app.events == expected
+
+
+def test_quit_reports_a_process_that_survives_everything(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, None)
+    lock = tmp_path / "x.dwl"
+    lock.write_text("lock")
+    session = make_session(app)
+    session._dwl.add(lock)
+    with pytest.raises(CadError) as info:
+        session.quit(timeout=20)
+    assert info.value.code == "TIMEOUT" and info.value.exit_code == ExitCode.TIMEOUT
+    assert app.events == ["quit", "close", "kill"]
+    assert lock.exists()  # a live process may still own it
+
+
+def test_quit_closes_documents_first_and_removes_only_own_lock_files(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    preexisting = drawing.with_suffix(".dwl")
+    preexisting.write_text("someone else")
+    app.create_on_open = [".dwl2"]
+    session = make_session(app)
+    session.open(drawing)
+    assert drawing.with_suffix(".dwl2").exists()
+    session.quit()
+    assert app.events == ["doc.close", "quit"]
+    assert not drawing.with_suffix(".dwl2").exists()  # created by this session: removed
+    assert preexisting.exists()  # was there before: left alone
+
+
+def test_quit_is_idempotent_and_releases_the_lock(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    lock = LockProbe()
+    import contextlib as cl
+
+    stack = cl.ExitStack()
+    stack.enter_context(lock())
+    session = make_session(app, stack=stack)
+    session.quit()
+    session.quit()
+    assert app.events == ["quit"] and lock.exited == 1
+
+
+def test_quit_tolerates_server_gone_during_quit(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    app.quit_error = FakeComError(-2147417848)  # RPC_E_DISCONNECTED: it died while quitting
+    patch_process(monkeypatch, app, "quit")
+    session = make_session(app)
+    session.quit()
+    assert not session.warnings
+
+
+def test_quit_refetches_the_application_object(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    stale, fresh = FakeApp(), FakeApp()
+    stale.Quit = lambda: (_ for _ in ()).throw(AttributeError("<unknown>.Quit"))  # type: ignore[method-assign]
+    patch_process(monkeypatch, fresh, "quit")
+    monkeypatch.setattr(acad, "_wrap", lambda disp: fresh)
+    session = make_session(stale, disp=object())
+    session.quit()
+    assert fresh.events == ["quit"]
+
+
+def test_unhealthy_session_shortens_the_polite_wait(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "kill")
+    session = make_session(app)
+    session._unhealthy = True
+    session.quit(timeout=90)
+    assert app.events == ["quit", "close", "kill"]
+    assert clock.t < 90 * 0.5 + 90 * 0.25 + 5  # did not wait the full graceful phase
+
+
+def test_context_manager_always_quits(monkeypatch: pytest.MonkeyPatch, clock: Clock) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    with pytest.raises(RuntimeError), make_session(app):
+        raise RuntimeError("work failed")
+    assert app.events == ["quit"]
+
+
+# --- sysvars ---------------------------------------------------------------------------------------
+
+
+def test_sysvars_restore_on_exception(clock: Clock) -> None:
+    raw = FakeRawDoc("x.dwg")
+    session = make_session()
+    with pytest.raises(RuntimeError), session.sysvars(raw, ISAVEBAK=0, BACKGROUNDPLOT=0):
+        assert raw.vars["ISAVEBAK"] == 0 and raw.vars["BACKGROUNDPLOT"] == 0
+        raise RuntimeError("boom")
+    assert raw.vars["ISAVEBAK"] == 1 and raw.vars["BACKGROUNDPLOT"] == 2
+
+
+def test_sysvars_never_touches_filedia(clock: Clock) -> None:
+    raw = FakeRawDoc("x.dwg")
+    with pytest.raises(CadError) as info, make_session().sysvars(raw, FileDia=0):
+        pass
+    assert info.value.exit_code == ExitCode.BAD_ARGS and raw.vars["FILEDIA"] == 1
+
+
+def test_sysvars_unchanged_value_is_not_written(clock: Clock) -> None:
+    raw = FakeRawDoc("x.dwg")
+    sets: list[tuple[str, Any]] = []
+    original = raw.SetVariable
+    raw.SetVariable = lambda n, v: (sets.append((n, v)), original(n, v))[1]  # type: ignore[method-assign]
+    with make_session().sysvars(raw, ISAVEBAK=1):
+        pass
+    assert sets == []
+
+
+def test_sysvars_restore_failure_is_reported_not_raised(clock: Clock) -> None:
+    raw = FakeRawDoc("x.dwg")
+    session = make_session()
+    original = raw.SetVariable
+
+    def set_variable(name: str, value: Any) -> None:
+        if value == 1:  # the restore
+            raise FakeComError(-2147352567)
+        original(name, value)
+
+    raw.SetVariable = set_variable  # type: ignore[method-assign]
+    with session.sysvars(raw, ISAVEBAK=0):
+        pass
+    assert any("could not restore ISAVEBAK" in w for w in session.warnings)
+
+
+# --- documents -------------------------------------------------------------------------------------
+
+
+def test_open_refuses_a_document_the_user_has_open(clock: Clock, tmp_path: Path) -> None:
+    drawing = tmp_path / "user.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    app.Documents.items.append(FakeRawDoc(str(drawing)))
+    session = make_session(app)
+    with pytest.raises(CadError) as info:
+        session.open(drawing)
+    assert info.value.code == "DOC_OPEN_BY_USER" and info.value.exit_code == ExitCode.BUSY
+    assert session.documents == []
+
+
+def test_open_ignores_unsaved_untitled_documents(clock: Clock, tmp_path: Path) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    app.Documents.items.append(FakeRawDoc("Drawing1.dwg"))  # the new instance's blank document
+    doc = make_session(app).open(drawing)
+    assert doc.path == drawing
+
+
+def test_open_missing_file(clock: Clock, tmp_path: Path) -> None:
+    with pytest.raises(CadError) as info:
+        make_session().open(tmp_path / "nope.dwg")
+    assert info.value.code == "NOT_FOUND"
+
+
+def test_doc_registry_cleanup_and_reopen(clock: Clock, tmp_path: Path) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    session = make_session()
+    doc = session.open(drawing)
+    assert session.documents == [doc]
+    with pytest.raises(CadError) as info:
+        session.open(drawing)
+    assert info.value.code in {"DOC_ALREADY_OPEN", "DOC_OPEN_BY_USER"}
+    doc.close()
+    doc.close()  # idempotent
+    assert session.documents == [] and doc.raw.closed
+
+
+def test_failed_close_keeps_doc_registered_and_quit_escalates(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    patch_process(monkeypatch, app, "kill")
+    raw = FakeRawDoc(str(drawing))
+    raw.close_error = FakeComError(-2147352567)
+    app.Documents.next_open = raw
+    session = make_session(app)
+    session.open(drawing)
+    session.quit(timeout=40)
+    assert any("could not close" in w for w in session.warnings)
+    assert app.events[-3:] == ["quit", "close", "kill"]
+
+
+# --- pure helpers ----------------------------------------------------------------------------------
+
+MEDIA = [
+    "ISO_A4_(210.00_x_297.00_MM)",
+    "ISO_A4_(297.00_x_210.00_MM)",
+    "ISO_A3_(297.00_x_420.00_MM)",
+    "ISO_A3_(420.00_x_297.00_MM)",
+    "ISO_full_bleed_A3_(420.00_x_297.00_MM)",
+    "ANSI_A_(8.50_x_11.00_INCHES)",
+    "UserDefinedMetric_(420.00_x_297.00_MM)",
+]
+
+
+def test_parse_media_mm() -> None:
+    assert acad.parse_media_mm("ISO_A3_(420.00_x_297.00_MM)") == (420.0, 297.0)
+    size = acad.parse_media_mm("ANSI_A_(8.50_x_11.00_INCHES)")
+    assert size is not None and abs(size[0] - 215.9) < 0.01 and abs(size[1] - 279.4) < 0.01
+    assert acad.parse_media_mm("Custom") is None
+
+
+def test_closest_iso_media_keeps_orientation_and_prefers_regular() -> None:
+    assert acad.closest_iso_media(MEDIA, 420, 297) == "ISO_A3_(420.00_x_297.00_MM)"
+    assert acad.closest_iso_media(MEDIA, 297, 420) == "ISO_A3_(297.00_x_420.00_MM)"
+    assert acad.closest_iso_media(MEDIA, 418, 295) == "ISO_A3_(420.00_x_297.00_MM)"
+    assert acad.closest_iso_media(MEDIA, 200, 290) == "ISO_A4_(210.00_x_297.00_MM)"
+    assert acad.closest_iso_media(["ANSI_A_(8.50_x_11.00_INCHES)"], 210, 297) is None
+
+
+def test_sizes_match_either_orientation_with_tolerance() -> None:
+    assert acad.sizes_match((420.0, 297.0), (297.0, 420.0))
+    assert acad.sizes_match((419.0, 296.5), (420.0, 297.0))
+    assert not acad.sizes_match((210.0, 297.0), (420.0, 297.0))
+
+
+def test_temp_sibling_is_unique_and_beside_destination(tmp_path: Path) -> None:
+    dst = tmp_path / "out.pdf"
+    a, b = acad._temp_sibling(dst, ".pdf"), acad._temp_sibling(dst, ".pdf")
+    assert a != b and a.parent == tmp_path and a.suffix == ".pdf"
+
+
+def test_verify_fresh_rejects_missing_empty_and_stale(tmp_path: Path) -> None:
+    started = time.time()
+    with pytest.raises(CadError):
+        acad._verify_fresh(tmp_path / "none.pdf", started)
+    empty = tmp_path / "empty.pdf"
+    empty.write_bytes(b"")
+    with pytest.raises(CadError) as info:
+        acad._verify_fresh(empty, started)
+    assert info.value.code == "PLOT_BAD_OUTPUT"
+    old = tmp_path / "old.pdf"
+    old.write_bytes(b"%PDF-1.4")
+    os.utime(old, (started - 3600, started - 3600))
+    with pytest.raises(CadError) as info:
+        acad._verify_fresh(old, started)
+    assert info.value.code == "STALE_OUTPUT"
+    fresh = tmp_path / "fresh.pdf"
+    fresh.write_bytes(b"%PDF-1.4")
+    acad._verify_fresh(fresh, started)
+
+
+def _dxf_with_viewports(path: Path, statuses: list[int]) -> None:
+    rows = ["0", "SECTION", "2", "ENTITIES"]
+    for index, status in enumerate(statuses):
+        rows += ["0", "VIEWPORT", "5", f"A{index}", "68", str(status), "69", str(index + 1)]
+    rows += ["0", "ENDSEC", "0", "EOF"]
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def test_scan_viewports(tmp_path: Path) -> None:
+    path = tmp_path / "v.dxf"
+    _dxf_with_viewports(path, [1, 2, 0, -1])
+    found = acad.scan_viewports(path)
+    assert found is not None
+    assert [(v["id"], v["status"]) for v in found] == [(1, 1), (2, 2), (3, 0), (4, -1)]
+
+
+def test_scan_viewports_skips_binary_dxf(tmp_path: Path) -> None:
+    path = tmp_path / "b.dxf"
+    path.write_bytes(b"AutoCAD Binary DXF\r\n\x1a\x00" + b"\x00" * 20)
+    assert acad.scan_viewports(path) is None
+
+
+def test_scan_viewports_on_generated_fixture(fixtures_dir: Path) -> None:
+    found = acad.scan_viewports(fixtures_dir / "sheet_set.dxf")
+    assert found is not None and len(found) >= 2
+    assert all(v["status"] is not None for v in found)
+
+
+# --- export and plot flows (fake documents) ------------------------------------------------------
+
+
+class FakeLayout:
+    def __init__(self, name: str, config: str = "None", size: tuple[float, float] = (420, 297)):
+        self.Name = name
+        self.ConfigName = config
+        self._size = size
+        self.PaperUnits = 1
+        self.CanonicalMediaName = "None"
+        self.refreshed = 0
+        self.devices = ("DWG To PDF.pc3", "Some Printer")
+        self.media = tuple(MEDIA)
+        self.set_calls: list[tuple[str, Any]] = []
+
+    def GetPaperSize(self) -> tuple[float, float]:
+        return self._size
+
+    def RefreshPlotDeviceInfo(self) -> None:
+        self.refreshed += 1
+
+    def GetPlotDeviceNames(self) -> tuple[str, ...]:
+        return self.devices
+
+    def GetCanonicalMediaNames(self) -> tuple[str, ...]:
+        return self.media
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in {"ConfigName", "CanonicalMediaName", "PlotRotation", "StyleSheet"}:
+            self.__dict__.setdefault("set_calls", []).append((name, value))
+        object.__setattr__(self, name, value)
+
+
+def test_configure_plot_falls_back_to_pdf_device_with_closest_media(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A", config="None", size=(297, 210))
+    warnings: list[str] = []
+    media = make_session()._configure_plot(lay, {}, warnings)
+    assert lay.ConfigName == "DWG To PDF.pc3"
+    assert lay.CanonicalMediaName == "ISO_A4_(297.00_x_210.00_MM)"
+    assert media == (297.0, 210.0)
+    assert any("no plotter" in w for w in warnings) and any("media" in w for w in warnings)
+
+
+def test_configure_plot_keeps_a_working_pdf_setup(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A", config="DWG To PDF.pc3")
+    lay.CanonicalMediaName = "ISO_A3_(420.00_x_297.00_MM)"
+    lay.set_calls.clear()
+    warnings: list[str] = []
+    media = make_session()._configure_plot(lay, {}, warnings)
+    assert lay.set_calls == [] and warnings == [] and media == (420.0, 297.0)
+
+
+def test_configure_plot_replaces_a_non_pdf_device(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A", config="Some Printer")
+    warnings: list[str] = []
+    make_session()._configure_plot(lay, {}, warnings)
+    assert lay.ConfigName == "DWG To PDF.pc3"
+
+
+def test_configure_plot_explicit_page_setup(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A")
+    media = make_session()._configure_plot(
+        lay,
+        {"device": "DWG To PDF.pc3", "media": "ISO_A4_(210.00_x_297.00_MM)", "rotation": 90},
+        [],
+    )
+    assert media == (210.0, 297.0)
+    assert ("PlotRotation", 1) in lay.set_calls
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [{"device": "Missing.pc3"}, {"media": "ISO_A0_(841.00_x_1189.00_MM)"}],
+)
+def test_configure_plot_rejects_unknown_device_or_media(
+    clock: Clock, setup: dict[str, Any]
+) -> None:
+    with pytest.raises(CadError) as info:
+        make_session()._configure_plot(FakeLayout("Sheet-A"), setup, [])
+    assert info.value.exit_code == ExitCode.PRECONDITION_FAILED and info.value.hint
+
+
+def test_configure_plot_without_pdf_plotter_installed(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A")
+    lay.devices = ("Some Printer",)
+    with pytest.raises(CadError) as info:
+        make_session()._configure_plot(lay, {}, [])
+    assert "DWG To PDF.pc3" in info.value.message
+
+
+def plot_session(
+    tmp_path: Path, plot_to_file: Any, layout: FakeLayout | None = None
+) -> tuple[acad.AcadSession, FakeApp, FakeRawDoc, Path]:
+    drawing = tmp_path / "sheet.dwg"
+    drawing.write_text("x")
+    lay = layout or FakeLayout("Sheet-A")
+    app = FakeApp()
+    raw = FakeRawDoc(str(drawing), app.events)
+    raw.layouts = SimpleNamespace(Count=2, Item=lambda i: [SimpleNamespace(Name="Model"), lay][i])
+    raw.Plot = SimpleNamespace(QuietErrorMode=False, PlotToFile=plot_to_file)
+    app.Documents.next_open = raw
+    return make_session(app), app, raw, drawing
+
+
+def test_plot_false_return_is_an_error_and_cleans_up(clock: Clock, tmp_path: Path) -> None:
+    session, _app, raw, drawing = plot_session(tmp_path, lambda p: False)
+    dst = tmp_path / "out.pdf"
+    with pytest.raises(CadError) as info:
+        session.plot_layout_pdf(drawing, "sheet-a", dst)
+    assert info.value.code == "PLOT_FAILED"
+    assert raw.closed and session.documents == []
+    assert raw.vars["BACKGROUNDPLOT"] == 2 and raw.vars["ISAVEBAK"] == 1  # restored
+    assert not dst.exists() and not list(tmp_path.glob("*.part.*"))
+
+
+def test_plot_writes_straight_to_the_final_name_and_warns_about_the_viewer(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    targets: list[str] = []
+
+    def plot(path: str) -> bool:
+        targets.append(path)
+        Path(path).write_bytes(b"%PDF-1.7 fake")
+        return True
+
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: (1, (420.0, 297.0)))
+    session, _app, raw, drawing = plot_session(tmp_path, plot)
+    dst = tmp_path / "out.pdf"
+    warnings = session.plot_layout_pdf(drawing, "Sheet-A", dst)
+    # no temporary name that a viewer could be started on and that is then moved away
+    assert targets == [str(dst)] and dst.read_bytes().startswith(b"%PDF-1.7")
+    assert raw.closed and raw.ctab_history == ["Sheet-A"]
+    assert [p.name for p in tmp_path.iterdir() if p.suffix == ".pdf"] == ["out.pdf"]
+    assert any("no plotter" in w for w in warnings)
+    assert acad.VIEWER_WARNING in warnings
+    assert raw.Plot.QuietErrorMode is True
+
+
+def test_plot_refuses_an_existing_destination(clock: Clock, tmp_path: Path) -> None:
+    session, _app, raw, drawing = plot_session(tmp_path, lambda p: True)
+    dst = tmp_path / "out.pdf"
+    dst.write_bytes(b"%PDF-1.4 OLD")
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(drawing, "Sheet-A", dst)
+    assert err.value.code == "DEST_EXISTS" and dst.read_bytes() == b"%PDF-1.4 OLD"
+    assert session.documents == [] and not raw.closed  # nothing was even opened
+
+
+@pytest.mark.parametrize(
+    ("info", "code"),
+    [((2, (420.0, 297.0)), "PLOT_BAD_OUTPUT"), ((1, (210.0, 297.0)), "PLOT_BAD_OUTPUT")],
+)
+def test_plot_rejects_wrong_page_count_or_size(
+    monkeypatch: pytest.MonkeyPatch,
+    clock: Clock,
+    tmp_path: Path,
+    info: tuple[int, tuple[float, float]],
+    code: str,
+) -> None:
+    def plot(path: str) -> bool:
+        Path(path).write_bytes(b"%PDF-1.7 fake")
+        return True
+
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: info)
+    session, _app, raw, drawing = plot_session(tmp_path, plot)
+    dst = tmp_path / "out.pdf"
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(drawing, "Sheet-A", dst)
+    assert err.value.code == code and not dst.exists() and raw.closed
+
+
+def test_plot_rejects_non_pdf_output(clock: Clock, tmp_path: Path) -> None:
+    def plot(path: str) -> bool:
+        Path(path).write_bytes(b"not a pdf")
+        return True
+
+    session, _app, raw, drawing = plot_session(tmp_path, plot)
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(drawing, "Sheet-A", tmp_path / "out.pdf")
+    assert err.value.code == "PLOT_BAD_OUTPUT" and raw.closed
+
+
+def test_plot_unknown_layout_lists_alternatives_and_closes_doc(
+    clock: Clock, tmp_path: Path
+) -> None:
+    session, _app, raw, drawing = plot_session(tmp_path, lambda p: True)
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(drawing, "Nope", tmp_path / "out.pdf")
+    assert err.value.code == "LAYOUT_NOT_FOUND" and "Sheet-A" in (err.value.hint or "")
+    assert raw.closed
+
+
+def test_plot_refuses_model_space_and_unknown_page_setup_keys(clock: Clock, tmp_path: Path) -> None:
+    session, *_ = plot_session(tmp_path, lambda p: True)
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(tmp_path / "sheet.dwg", "Model", tmp_path / "o.pdf")
+    assert err.value.exit_code == ExitCode.PRECONDITION_FAILED
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(
+            tmp_path / "sheet.dwg", "Sheet-A", tmp_path / "o.pdf", page_setup={"bogus": 1}
+        )
+    assert err.value.exit_code == ExitCode.BAD_ARGS
+
+
+def test_plot_close_failure_marks_session_unhealthy(clock: Clock, tmp_path: Path) -> None:
+    session, _app, raw, drawing = plot_session(tmp_path, lambda p: False)
+    raw.close_error = FakeComError(-2147352567)
+    with pytest.raises(CadError) as err:
+        session.plot_layout_pdf(drawing, "Sheet-A", tmp_path / "out.pdf")
+    assert err.value.code == "PLOT_FAILED"  # the real error is not masked by the close error
+    assert session._unhealthy
+
+
+def export_session(
+    tmp_path: Path, content: str | None
+) -> tuple[acad.AcadSession, FakeRawDoc, Path]:
+    drawing = tmp_path / "sheet.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    raw = FakeRawDoc(str(drawing), app.events)
+    raw.saveas_writes = content
+    names = ["Model", "Sheet-A", "Sheet-B"]
+    raw.layouts = SimpleNamespace(Count=3, Item=lambda i: SimpleNamespace(Name=names[i]))
+    raw.vars["CTAB"] = "Sheet-A"
+    app.Documents.next_open = raw
+    return make_session(app), raw, drawing
+
+
+def test_export_dxf_activates_every_layout_and_restores_the_tab(
+    clock: Clock, tmp_path: Path
+) -> None:
+    dxf = tmp_path / "v.dxf"
+    _dxf_with_viewports(dxf, [1, 2])
+    session, raw, drawing = export_session(tmp_path, dxf.read_text("utf-8"))
+    dst = tmp_path / "out.dxf"
+    warnings = session.export_dxf(drawing, dst)
+    assert raw.ctab_history == ["Sheet-A", "Sheet-B", "Sheet-A"]
+    assert raw.events.index("activate") < raw.events.index("saveas:61")
+    assert warnings == [] and dst.exists() and raw.closed
+    assert raw.vars["ISAVEBAK"] == 1  # restored
+    assert not list(tmp_path.glob("*.part.*"))
+
+
+def test_export_dxf_warns_when_viewport_status_is_unreliable(clock: Clock, tmp_path: Path) -> None:
+    dxf = tmp_path / "v.dxf"
+    _dxf_with_viewports(dxf, [1, 0, 0])
+    session, _raw, drawing = export_session(tmp_path, dxf.read_text("utf-8"))
+    warnings = session.export_dxf(drawing, tmp_path / "out.dxf")
+    assert len(warnings) == 1 and "2 viewport(s)" in warnings[0]
+
+
+def test_export_dxf_without_activation_skips_ctab(clock: Clock, tmp_path: Path) -> None:
+    session, raw, drawing = export_session(tmp_path, "0\nEOF\n")
+    session.export_dxf(drawing, tmp_path / "out.dxf", activate_layouts=False)
+    assert raw.ctab_history == []
+
+
+def test_export_dxf_that_writes_nothing_leaves_the_old_destination(
+    clock: Clock, tmp_path: Path
+) -> None:
+    session, raw, drawing = export_session(tmp_path, None)
+    dst = tmp_path / "out.dxf"
+    dst.write_text("OLD")
+    with pytest.raises(CadError) as err:
+        session.export_dxf(drawing, dst)
+    assert err.value.code == "STALE_OUTPUT" and dst.read_text() == "OLD" and raw.closed
+
+
+def test_export_dxf_rejects_unknown_version(clock: Clock, tmp_path: Path) -> None:
+    session, *_ = export_session(tmp_path, "")
+    with pytest.raises(CadError) as err:
+        session.export_dxf(tmp_path / "sheet.dwg", tmp_path / "o.dxf", version="1999")
+    assert err.value.exit_code == ExitCode.BAD_ARGS
+
+
+def test_save_dwg_closes_the_document_before_moving(clock: Clock, tmp_path: Path) -> None:
+    session, raw, drawing = export_session(tmp_path, "DWG")
+    doc = session.open(drawing)
+    dst = tmp_path / "copy.dwg"
+    session.save_dwg(doc, dst)
+    assert raw.events.index("saveas:60") < raw.events.index("doc.close")
+    assert dst.read_text() == "DWG" and session.documents == []
+
+
+# --- COM (real CAD) ------------------------------------------------------------------------------
+
+
+def _cad_installed() -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        winreg.CloseKey(winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, "AutoCAD.Application"))
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.com
+@pytest.mark.skipif(not _cad_installed(), reason="no AutoCAD COM server registered")
+def test_com_session_end_to_end(
+    tmp_path: Path, fixtures_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One instance: DWG made from a fixture, DXF export, viewport check, plots, quit."""
+    import ezdxf
+    import pypdfium2
+
+    out = Path(os.environ.get("CAD_DRAWINGS_COM_OUT", tmp_path)) / "com-test"
+    out.mkdir(parents=True, exist_ok=True)
+    image = "acad.exe"
+    if acad._list_pids(image):
+        pytest.skip("another acad.exe is running; refusing to touch it")
+    names = ("ISAVEBAK", "ISAVEPERCENT", "BACKGROUNDPLOT", "FILEDIA", "CTAB")
+    produced: list[Path] = []
+    session = acad.AcadSession.start(timeout=120)
+    pid = session.pid
+    try:
+        assert pid in acad._list_pids(image)
+        # a DWG for the tests, created through our own session
+        dwg = out / "sheet_set.dwg"
+        session.save_dwg(session.open(fixtures_dir / "sheet_set.dxf"), dwg)
+        produced.append(dwg)
+
+        def read_vars() -> dict[str, Any]:
+            with session.open(dwg) as doc:
+                return {n: doc.raw.GetVariable(n) for n in names}
+
+        before = read_vars()
+
+        # the user's own document is refused (simulated: opened behind the session's back)
+        user_dwg = out / "user_copy.dwg"
+        user_dwg.write_bytes(dwg.read_bytes())
+        produced.append(user_dwg)
+        session._app_call(lambda a: a.Documents.Open(str(user_dwg), True))
+        with pytest.raises(CadError) as refusal:
+            session.open(user_dwg)
+        assert refusal.value.code == "DOC_OPEN_BY_USER"
+        session._app_call(lambda a: a.Documents.Item(1).Close(False))
+
+        # export with activated layouts: both viewports on, frozen layer intact
+        dxf = out / "sheet_set_export.dxf"
+        warnings = session.export_dxf(dwg, dxf)
+        produced.append(dxf)
+        assert warnings == []
+        drawing = ezdxf.readfile(dxf)
+        frozen = {}
+        for layout in drawing.layouts:
+            if layout.name == "Model":
+                continue
+            viewports = list(layout.viewports())
+            assert viewports and all(vp.dxf.status > 0 for vp in viewports), layout.name
+            frozen[layout.name] = {n for vp in viewports for n in vp.frozen_layers}
+        assert not frozen["Sheet-A"] and frozen["Sheet-B"]
+
+        # plots: one single-page PDF each, A3 landscape from the built-in PDF plotter
+        for name in ("Sheet-A", "Sheet-B"):
+            pdf = out / f"{name}.pdf"
+            started = time.time()
+            session.plot_layout_pdf(dwg, name, pdf)
+            produced.append(pdf)
+            assert pdf.stat().st_mtime >= started - 2 and pdf.stat().st_size > 0
+            doc = pypdfium2.PdfDocument(str(pdf))
+            try:
+                assert len(doc) == 1
+                width, height = doc[0].get_size()
+            finally:
+                doc.close()
+            assert acad.sizes_match((width / 72 * 25.4, height / 72 * 25.4), (420.0, 297.0))
+
+        # an error path leaves nothing open
+        with pytest.raises(CadError):
+            session.plot_layout_pdf(dwg, "No-such-layout", out / "x.pdf")
+        assert session.documents == []
+
+        assert read_vars() == before  # system variables restored, FILEDIA untouched
+    finally:
+        try:
+            session.quit()
+        finally:
+            for path in produced:
+                with contextlib.suppress(OSError):
+                    path.unlink()
+    assert not acad._list_pids(image), "an acad.exe was left running"
+    assert pid not in acad._list_pids(image)
+    assert not list(out.glob("*.dwl*")) and not list(out.glob("*.part.*"))
