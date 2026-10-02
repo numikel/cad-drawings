@@ -6,10 +6,10 @@ description: >-
   these revisions", "update the title blocks", "export the sheets to PDF", or "how big is
   this area". Handles layers, texts, blocks and attributes, layouts and viewports, units and
   underlay alignment, and failing CAD automation (RPC rejections, hung processes). Works on
-  Windows, macOS and Linux without AutoCAD, and prefers AutoCAD or a compatible CAD via COM
-  on Windows for native DWG access and measurements. For deliverable PDFs or editing, write
-  custom code on top of the bundled COM library. Not for Revit, SketchUp, 3D models, or
-  PDF or raster image editing.
+  Windows, macOS and Linux without AutoCAD; uses AutoCAD or a compatible CAD via COM on
+  Windows only when the user agrees. For deliverable PDFs or editing, write custom code on
+  top of the bundled COM library. Not for Revit, SketchUp, 3D models, or PDF or raster
+  image editing.
 license: MIT
 compatibility: >-
   Python 3.10+ with ezdxf 1.4.4+ and pypdfium2. DWG files require AutoCAD or a compatible CAD
