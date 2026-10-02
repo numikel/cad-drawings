@@ -33,6 +33,16 @@ Terms that identify a client or a source project are never written into the repo
 - **COM tests run serially, one instance, synthetic fixtures only**, marked `@pytest.mark.com`, and only after the maintainer confirms no CAD work is in progress.
 - Dev environment: `.venv` (Python 3.13, ezdxf>=1.4.4, pywin32>=312). On Windows `uv run` can fail from some shells; call `.venv/Scripts/python.exe -m <tool>` instead.
 
+## Releasing and versions
+
+One Semantic Versioning number covers the skill (`SKILL.md` metadata), the library (`cadlib.__version__`) and the plugin (`.claude-plugin/plugin.json`); `tests/test_versions.py` fails when they differ. Bump them together.
+
+1. Move the `## [Unreleased]` notes in `CHANGELOG.md` to `## [X.Y.Z] - YYYY-MM-DD`, bump the three version strings, and keep a fresh `## [Unreleased]` above.
+2. All CI jobs on `main` are green, and `tests/check_forbidden.py` is clean (also over the whole history before the first public release).
+3. Tag and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`. A tag with a hyphen (`v0.2.0-rc.1`) is published as a pre-release.
+4. The `release` workflow checks that the tag equals the versions in the files, runs the tests, builds `cad-drawings-skill-vX.Y.Z.zip` with a checksum, and creates the GitHub release with the changelog section as notes. The plugin version pins Claude Code users until it is bumped, so never change files of a published tag: release a patch version instead.
+5. Version rules: patch = fixes only; minor = new commands, flags or fields (backward compatible); major = a changed exit code, a removed or renamed flag, or a changed JSON field.
+
 ## Parallel agents
 
 Each track writes only to its own files and its own scratch subdirectory. Shared contracts (JSON output schema, `edit-spec.schema.json`, `cadlib` API) are written first by the main context. Agents delete large intermediate artifacts (DXF/DWG copies, renders) from scratch before reporting.
