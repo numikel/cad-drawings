@@ -171,3 +171,37 @@ def ensure_dxf(src: Path, ctx: RunContext, *, prefer=None, base=None, converters
 
 ### Viewport geometry (verified against a real CAD plot)
 The DXF `view_center_point` is in display coordinates: `DCS = R(+twist) * (WCS - target)`, twist counter-clockwise in degrees, target = origin for plan views. A model point lies inside a viewport window when its DCS image is within `size * view_height / height / 2` of the stored centre on each axis. `prints_on` is geometry-based, not a plot.
+
+## F2 contract: `plot` and `edit`
+
+Written by the main context before the F2 tracks start. Decisions already taken by the maintainer: a conversion made with consent may be reused from the cache in a task without consent, but the result must say so (warning `CACHED_CONVERSION: DXF taken from the conversion cache, made earlier by <backend> on <date>`); consent for CAD is always the explicit `--allow-com`.
+
+### `plot` (`cadlib/plot.py`, module name `plot`)
+`plot FILE [--layout NAME ...] --allow-com [--device NAME] [--media NAME] [--area layout|extents|display|window] [--window X1,Y1,X2,Y2] [--scale fit|1:N|N:1] [--rotate 0|90|180|270] [--style-sheet NAME] [--dest DIR] [--overwrite] [--timeout S] [--run-dir PATH]`
+- A deliverable PDF always comes from the CAD application. Without `--allow-com`: exit 3 `NO_BACKEND`, hint "ask the user, then rerun with --allow-com". No ezdxf fallback for deliverables.
+- Works on a staged copy (`runs.stage_copy`), never on the original; one fresh document per layout (`AcadSession.plot_layout_pdf` with `page_setup`); default layouts = paper layouts with content (skip empty ones with a warning, as `render` does).
+- Output `<stem>__<layout>.pdf` in the run directory with `source_mtime`; verification: single page, page size equal to the media within tolerance (already in acad.py), non-empty; a report `plot.json` listing for every PDF the layout, device, media, scale, rotation, page size in mm, warnings.
+- `--dest DIR`: copy finished PDFs there; an existing target without `--overwrite` is exit 6 `EXISTS` and nothing in `--dest` changes; copies are atomic (temp + replace).
+- Always return `VIEWER_WARNING` and the page-setup fallback warnings. After the run no CAD process of ours remains.
+
+### `edit` (`cadlib/edit.py`, `cadlib/acad_edit.py`, `cadlib/edit_dxf.py`; module name `edit`)
+`edit --spec edits.json [--dry-run] [--out PATH] [--overwrite] [--allow-com] [--timeout S] [--run-dir PATH]`
+- Spec: `assets/edit-spec.schema.json` (version 1). Validate structure without requiring `jsonschema` at run time (a small validator in code; a test cross-checks it against the schema with `jsonschema`). Invalid spec: exit 2 `SPEC_INVALID`.
+- Two passes: (1) validate everything: `base.sha1` equals the SHA-1 of the source (else exit 6 `BASE_CHANGED`), every `handle` exists, every `expect` matches (else exit 6 `EXPECT_FAILED` listing all mismatches), ids unique; nothing is written; (2) apply. `--dry-run` stops after pass 1 and prints the plan. An edit whose entity is already in the requested state is reported as `already_applied`, not as an error (idempotent).
+- Backends: DXF source -> ezdxf on a copy, writes `<stem>_edited.dxf`. DWG source -> COM (needs `--allow-com`, else exit 3) on a staged copy through `AcadSession.open(path, readonly=False)`; all targets by `HandleToObject`; save with `AcadSession.save_dwg` to `<stem>_edited.dwg` in the run directory. Never loop over entities through COM. The original is never opened for writing.
+- Operations: `replace-text` (TEXT, MTEXT raw string with formatting codes preserved outside the match, ATTRIB; `old` must occur exactly once unless `count` is given), `set-props` (layer, color, height, rotation, ... mapped from DXF names to COM property names; unknown name -> `UNSUPPORTED`), `delete`, `move` (vector), `clone` (copy of an existing entity with offset; reports the new handle; optional target layer/space), `pan-viewport` (changes the view centre without changing scale or size; the stored centre is in display coordinates, see "Viewport geometry"; implement for DXF and, if it can be verified on a real CAD, for COM; otherwise `UNSUPPORTED` on COM with a clear hint).
+- Outputs: `changes.jsonl` (one line per edit: id, op, handle, before, after, status applied|already_applied|failed, new_handle for clone), `edit-report.json`, the edited file. `--out PATH` copies the edited file there atomically; refuses an existing target without `--overwrite` and refuses the source path.
+- Verification after applying (required): fingerprint the edited file and `diffing` it against the original; the set of changed, moved, removed and added entities must equal the plan (+ clones). Anything else is reported in the summary and the result is exit 7 (`partial`, code `UNINTENDED_CHANGE`) with the list; the edited file is still written for inspection but flagged.
+- Handles are valid for the file version they were read from; after a save the edited file is a new version: say so in the report.
+- New error codes (the main context adds them to `result.ERROR_CODES`: SPEC_INVALID=BAD_ARGS, BASE_CHANGED=PRECONDITION_FAILED, EXPECT_FAILED=PRECONDITION_FAILED, UNINTENDED_CHANGE=ERROR).
+
+### Ownership for F2
+| Track | Files |
+|---|---|
+| T5 | `cadlib/plot.py`, `tests/test_plot.py` |
+| T6 | `cadlib/edit.py`, `cadlib/acad_edit.py`, `cadlib/edit_dxf.py`, `tests/test_edit.py`, `tests/test_edit_com.py` |
+| T3b | `SKILL.md`, `references/plotting.md`, `references/com-automation.md` (edit recipes), `README.md`, `CHANGELOG.md`, `docs/measurements.md` |
+| T4b | `evals/evals.json`, `evals/trigger_queries.json`, `tests/test_skill_package.py`, `.github/workflows/ci.yml` |
+| main | `result.py`, `cad.py`, `__init__.py`, `convert.py` (cache warning), `conftest.py`, this file |
+
+COM tests in different tracks run concurrently on one machine: use the `com_exclusive` mechanism (tests marked `com` wait for the machine-wide lock automatically via `conftest.py`); never start CAD outside a test that holds it.

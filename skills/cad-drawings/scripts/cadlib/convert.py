@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import datetime
 import os
 import re
 import secrets
@@ -563,6 +564,13 @@ def ensure_dxf(
         if hit is not None:
             ctx.log(f"cache hit for {src.name} ({conv.name})")
             warnings = [APPROX_WARNING] if conv.approximate else []
+            made = datetime.datetime.fromtimestamp(
+                hit.stat().st_mtime, tz=datetime.timezone.utc
+            ).strftime("%Y-%m-%d %H:%M UTC")
+            warnings.append(
+                f"CACHED_CONVERSION: DXF taken from the conversion cache, made earlier by "
+                f"{conv.name} on {made}; tell the user"
+            )
             return DxfResult(hit, conv.name, conv.approximate, True, warnings)
     target = ctx.path(f"converted/{src.stem}.dxf")
     conv, warnings = convert(

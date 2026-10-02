@@ -82,3 +82,30 @@ def _no_real_cad_in_unit_tests(
 
     monkeypatch.setattr(acad, "_create_app", refuse)
     monkeypatch.setattr(acad, "_get_active", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _com_tests_wait_for_each_other(request: pytest.FixtureRequest) -> Any:
+    """Tests marked ``com`` take a machine-wide lock so parallel agents never share CAD."""
+    if not request.node.get_closest_marker("com"):
+        yield
+        return
+    import time
+
+    from cadlib import runs
+    from cadlib.result import CadError
+
+    deadline = time.monotonic() + 1500
+    while True:
+        try:
+            cm = runs.acquire_lock("com-tests")
+            cm.__enter__()
+            break
+        except CadError as err:
+            if err.code != "LOCKED" or time.monotonic() > deadline:
+                raise
+            time.sleep(5)
+    try:
+        yield
+    finally:
+        cm.__exit__(None, None, None)

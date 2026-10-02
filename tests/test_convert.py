@@ -461,6 +461,8 @@ def test_ensure_dxf_converts_once_and_then_hits_the_cache(
     assert not first.cached and oda.calls == 1 and first.backend == "oda"
     second = cv.ensure_dxf(dwg, ctx, base=base, converters=[oda])
     assert second.cached and oda.calls == 1 and second.path.parent == base / "cache"
+    assert not any("CACHED_CONVERSION" in w for w in first.warnings)
+    assert any("CACHED_CONVERSION" in w and "oda" in w for w in second.warnings)
     dwg.write_bytes(DWG_BYTES + b"edited")  # new content, new hash: no stale hit
     third = cv.ensure_dxf(dwg, ctx, base=base, converters=[oda])
     assert not third.cached and oda.calls == 2
