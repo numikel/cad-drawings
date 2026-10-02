@@ -76,7 +76,11 @@ def test_base_comes_from_env_when_not_given(
 
 def test_default_base_is_in_the_temp_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(runs.ENV_RUNS, raising=False)
-    assert runs.runs_base().name == "cad-drawings-runs"
+    # POSIX uses a per-user directory (mode 0700); Windows already has per-user temp folders
+    expected = (
+        "cad-drawings-runs" if sys.platform == "win32" else f"cad-drawings-runs-{os.getuid()}"
+    )
+    assert runs.runs_base().name == expected
 
 
 def test_path_is_inside_the_run_tracked_and_cannot_escape(tmp_path: Path) -> None:

@@ -334,6 +334,7 @@ def fake_oda_run(created: list[list[str]]) -> Callable[..., subprocess.Completed
 def test_oda_command_line_staging_and_untrusted_exit_code(
     dwg: Path, ctx: RunContext, valid_dxf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("DISPLAY", ":0")  # a display exists: no xvfb-run wrapper on Linux
     calls: list[list[str]] = []
     fake = fake_oda_run(calls)
     fake.dxf = valid_dxf  # type: ignore[attr-defined]

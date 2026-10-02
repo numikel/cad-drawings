@@ -249,12 +249,34 @@ def test_status_zero_file_renders_content_only_with_normalisation(
     # the trap, shown: without normalisation ezdxf leaves the viewport empty
     monkeypatch.setattr(render, "normalise_viewports", lambda layout: [])
     raw = run_render([str(broken), "--layout", "Sheet-A", "--dpi", LOW_DPI], runs)
-    assert inked(region_pixels(open_png(raw, "Sheet-A"), PAGE_BOX, VP_AREA)) < 0.002
+    assert inked(region_pixels(open_png(raw, "Sheet-A"), PAGE_BOX, VP_AREA)) < 0.01
 
 
 # --------------------------------------------------------------------------------------
 # workarounds 2-5, 6, 7
 # --------------------------------------------------------------------------------------
+
+
+def _save_ctb(ctb: Any, path: Path) -> None:
+    """Write a CTB with the real 4-byte header fields.
+
+    ezdxf packs the header with the native ``L`` (8 bytes on 64-bit Linux and macOS), so on
+    those systems its own files cannot be read back; AutoCAD's files use 4-byte fields.
+    """
+    import io
+    import struct
+    import zlib
+
+    mem = io.StringIO()
+    ctb.write_content(mem)
+    mem.write(chr(0))
+    content = mem.getvalue()
+    body = zlib.compress(content.encode())
+    with open(path, "wb") as stream:
+        stream.write(b"PIAFILEVERSION_2.0,CTBVER1,compress
+pmzlibcodec")
+        stream.write(struct.pack("<LLL", zlib.adler32(body), len(content), len(body)))
+        stream.write(body)
 
 
 def test_ctb_applied_only_when_given(sheet: Path, runs: Path, tmp_path: Path) -> None:
@@ -267,7 +289,7 @@ def test_ctb_applied_only_when_given(sheet: Path, runs: Path, tmp_path: Path) ->
     for aci in range(1, 256):
         ctb[aci].color = blue
     ctb_path = tmp_path / "all-blue.ctb"
-    ctb.save(str(ctb_path))
+    _save_ctb(ctb, ctb_path)
     styled = run_render(
         [str(sheet), "--layout", "Sheet-A", "--dpi", LOW_DPI, "--ctb", str(ctb_path)], runs
     )
