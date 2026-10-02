@@ -161,6 +161,7 @@ def diff_fingerprints(
         return groups
 
     sa, sb = scoped(a, names_a), scoped(b, names_b)
+    tol, handle_bound = _near_tolerances(a, b)
     changes: list[dict[str, Any]] = []
     noise: Counter[str] = Counter()
     matched_pairs = 0
@@ -237,6 +238,19 @@ def diff_fingerprints(
                     next_a.append(ea)
             still_a = next_a
             rest_b = [e for e in rest_b if id(e) not in used_b]
+        # 4. same entity edited in place: the anchor drifted a little (CAD recomputes the
+        #    insertion point of aligned text) and the content differs, so no exact match
+        near_pairs, still_a, rest_b = _pair_near_changed(still_a, rest_b, tol, handle_bound)
+        for ea, eb in near_pairs:
+            note_pair(ea, eb)
+            diffs = _prop_changes(ea["props"], eb["props"])
+            if ea["anchor"] != eb["anchor"]:
+                diffs.append({"field": "anchor", "old": ea["anchor"], "new": eb["anchor"]})
+            if ea.get("bbox") != eb.get("bbox"):
+                diffs.append({"field": "bbox", "old": ea.get("bbox"), "new": eb.get("bbox")})
+            changes.append(
+                {"kind": "changed", **_ref(ea), "handle_b": eb["handle"], "changes": diffs}
+            )
         for ea in still_a:
             changes.append({"kind": "removed", **_ref(ea), "to_confirm": True})
         for eb in rest_b:
@@ -265,6 +279,7 @@ def diff_fingerprints(
     cap = None if full else DIFF_JSON_CAP
     return {
         "counts": {k: counts.get(k, 0) for k in order},
+        "groups": group_changes(changes),
         "structural": structural,
         "noise": dict(noise),
         "matched_entities": matched_pairs,
@@ -319,3 +334,173 @@ def _structural_changes(
                 changes=[{"field": key, "old": a["header"].get(key), "new": b["header"].get(key)}],
             )
     return out
+
+
+MAX_SUMMARY_GROUPS = 10
+MAX_NAME_CHARS = 60
+MAX_FIRST_STRUCTURAL = 3
+MAX_DESCRIPTION_CHARS = 110
+
+
+def _scope_label(change: dict[str, Any]) -> str:
+    space = change["space"]
+    if space == "model":
+        return "model"
+    return f"block:{change['scope']}" if space == "block" else str(change["scope"])
+
+
+def _short(text: Any, limit: int = MAX_NAME_CHARS) -> str:
+    text = str(text)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def group_changes(changes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Changes grouped by (scope, layer, type), largest total volume first.
+
+    Ties keep the order in which the groups first appear (changed, moved, removed, added).
+    """
+    table: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for c in changes:
+        key = (_scope_label(c), str(c["layer"]), c["type"])
+        group = table.get(key)
+        if group is None:
+            group = table[key] = {
+                "scope": key[0],
+                "layer": key[1],
+                "type": key[2],
+                "removed": 0,
+                "added": 0,
+                "changed": 0,
+                "moved": 0,
+            }
+        group[c["kind"]] += 1
+    volume = lambda g: g["removed"] + g["added"] + g["changed"] + g["moved"]
+    return sorted(table.values(), key=lambda g: -volume(g))  # sorted() is stable
+
+
+def summary_groups(groups: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str | None]:
+    """Top groups for the size-capped summary (names shortened) and a truncation note."""
+    top = [
+        {**g, "scope": _short(g["scope"]), "layer": _short(g["layer"]), "type": _short(g["type"])}
+        for g in groups[:MAX_SUMMARY_GROUPS]
+    ]
+    note = None
+    if len(groups) > MAX_SUMMARY_GROUPS:
+        note = f"top {MAX_SUMMARY_GROUPS} of {len(groups)} groups; the full table is in diff.json"
+    return top, note
+
+
+def pick_first_changes(
+    structural: list[dict[str, Any]], changes: list[dict[str, Any]], limit: int
+) -> list[str]:
+    """A varied sample: up to 3 structural changes, then one change per group in turn."""
+    out = [
+        _short(c["description"], MAX_DESCRIPTION_CHARS) for c in structural[:MAX_FIRST_STRUCTURAL]
+    ]
+    queues: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for c in changes:
+        queues.setdefault((_scope_label(c), str(c["layer"]), c["type"]), []).append(c)
+    ordered = [queues[(g["scope"], g["layer"], g["type"])] for g in group_changes(changes) if g]
+    depth = 0
+    while len(out) < limit and any(depth < len(q) for q in ordered):
+        for queue in ordered:
+            if depth < len(queue) and len(out) < limit:
+                out.append(_short(queue[depth]["description"], MAX_DESCRIPTION_CHARS))
+        depth += 1
+    return out
+
+
+def dominant_hint(groups: list[dict[str, Any]], total: int) -> str | None:
+    """A ``next`` line when one group holds more than half of all entity changes."""
+    if not groups or total <= 0:
+        return None
+    top = groups[0]
+    volume = top["removed"] + top["added"] + top["changed"] + top["moved"]
+    if volume * 2 <= total:
+        return None
+    layer, kind = _short(top["layer"]), _short(top["type"])
+    return (
+        f"most changes are {kind} on layer {layer} ({volume}): "
+        f"consider `dump --layer {layer} --type {kind}`"
+    )
+
+
+NEAR_TOLERANCE = 0.01  # drawing units; scaled up for very large drawings
+NEAR_RELATIVE = 1e-6
+HANDLE_BOUND_RELATIVE = 0.01  # of the drawing extent
+
+
+def _near_tolerances(a: dict[str, Any], b: dict[str, Any]) -> tuple[float, float]:
+    """``(anchor tolerance, handle-match bound)`` from the extent of both drawings."""
+    xs: list[float] = []
+    ys: list[float] = []
+    for fp in (a, b):
+        for e in fp["entities"]:
+            if e["anchor"] is not None:
+                xs.append(e["anchor"][0])
+                ys.append(e["anchor"][1])
+    extent = max(max(xs) - min(xs), max(ys) - min(ys)) if xs else 0.0
+    return max(NEAR_TOLERANCE, NEAR_RELATIVE * extent), HANDLE_BOUND_RELATIVE * extent
+
+
+def _pair_near_changed(
+    removed: list[dict[str, Any]],
+    added: list[dict[str, Any]],
+    tol: float,
+    handle_bound: float,
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Pair leftover removed/added entities that are the same entity edited in place.
+
+    Required: same type, same layer (the scope is already equal) and either an anchor within
+    ``tol``, or the same handle with the anchor within ``handle_bound`` (a handle alone proves
+    nothing: re-saves renumber them). One-to-one, nearest first, ties by input order.
+    """
+    if not removed or not added:
+        return [], removed, added
+    cell = max(tol, 1e-9)
+    grid: dict[tuple[str, str, int, int], list[int]] = defaultdict(list)
+    by_handle: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    for j, e in enumerate(added):
+        if e["anchor"] is None:
+            continue
+        key = (e["type"], e["layer"])
+        grid[(*key, math.floor(e["anchor"][0] / cell), math.floor(e["anchor"][1] / cell))].append(j)
+        by_handle[(*key, e["handle"])].append(j)
+    candidates: list[tuple[float, int, int]] = []
+    for i, ea in enumerate(removed):
+        if ea["anchor"] is None:
+            continue
+        ax, ay = ea["anchor"]
+        cx, cy = math.floor(ax / cell), math.floor(ay / cell)
+        seen: set[int] = set()
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in grid.get((ea["type"], ea["layer"], cx + dx, cy + dy), ()):
+                    seen.add(j)
+        near = {
+            j
+            for j in seen
+            if math.hypot(added[j]["anchor"][0] - ax, added[j]["anchor"][1] - ay) <= tol
+        }
+        for j in by_handle.get((ea["type"], ea["layer"], ea["handle"]), ()):
+            d = math.hypot(added[j]["anchor"][0] - ax, added[j]["anchor"][1] - ay)
+            if d <= handle_bound:
+                near.add(j)
+        for j in near:
+            d = math.hypot(added[j]["anchor"][0] - ax, added[j]["anchor"][1] - ay)
+            candidates.append((d, i, j))
+    candidates.sort()
+    used_a: set[int] = set()
+    used_b: set[int] = set()
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for _d, i, j in candidates:
+        if i in used_a or j in used_b:
+            continue
+        used_a.add(i)
+        used_b.add(j)
+        pairs.append((removed[i], added[j]))
+    return (
+        pairs,
+        [e for i, e in enumerate(removed) if i not in used_a],
+        [e for j, e in enumerate(added) if j not in used_b],
+    )

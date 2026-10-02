@@ -433,3 +433,276 @@ def test_dump_expect_for_inserts_has_attributes_and_insertion_point(
     assert rec["expect"]["attrib"] == {t: a["value"] for t, a in claims["attribs"].items()}
     assert rec["expect"]["insert"][:2] == claims["insert"][:2]
     assert rec["expect"]["space"] == "model"
+
+
+# --------------------------------------------------------------------------------------
+# diff summary: groups, variety, hints
+# --------------------------------------------------------------------------------------
+
+
+def _restructured(tmp_path: Path, runs: Path) -> Any:
+    before, after = ezdxf.new("R2018"), ezdxf.new("R2018")
+    before.layers.add("OLD-LINES")
+    after.layers.add("NEW-POLY")
+    for i in range(400):
+        before.modelspace().add_line((i, 0), (i, 5), dxfattribs={"layer": "OLD-LINES"})
+    for i in range(300):
+        after.modelspace().add_lwpolyline([(i, 10), (i + 1, 12)], dxfattribs={"layer": "NEW-POLY"})
+    for doc, shift in ((before, 0), (after, 100)):
+        doc.modelspace().add_circle((5000 + shift, 0), 3)
+        doc.modelspace().add_circle((6000 + shift, 0), 4)
+    one, two = tmp_path / "before.dxf", tmp_path / "after.dxf"
+    before.saveas(one)
+    after.saveas(two)
+    return run_cmd("diff", [str(one), str(two)], runs)
+
+
+def test_diff_summary_groups_by_scope_layer_and_type(tmp_path: Path, runs: Path) -> None:
+    res = _restructured(tmp_path, runs)
+    s = res.summary
+    assert (s["removed"], s["added"], s["moved"]) == (400, 300, 2)
+    assert s["groups_total"] == 3 and "groups_note" not in s
+    assert [(g["layer"], g["type"]) for g in s["groups"]] == [
+        ("OLD-LINES", "LINE"),
+        ("NEW-POLY", "LWPOLYLINE"),
+        ("0", "CIRCLE"),
+    ]
+    assert s["groups"][0] == {
+        "scope": "model", "layer": "OLD-LINES", "type": "LINE",
+        "removed": 400, "added": 0, "changed": 0, "moved": 0,
+    }  # fmt: skip
+    assert s["groups"][1]["added"] == 300 and s["groups"][2]["moved"] == 2
+    full = json.loads(Path(res.outputs["diff"]["path"]).read_text("utf-8"))
+    assert len(full["groups"]) == 3  # the full table lives in diff.json
+
+
+def test_first_changes_mix_groups_and_hint_names_the_dominant_one(
+    tmp_path: Path, runs: Path
+) -> None:
+    res = _restructured(tmp_path, runs)
+    first = res.summary["first_changes"]
+    assert len(first) == 10
+    # round-robin over the three groups, not the first ten lines of one group
+    assert sum("LINE" in f and "LWPOLYLINE" not in f for f in first) < 6
+    assert any("LWPOLYLINE" in f for f in first) and any("CIRCLE" in f for f in first)
+    hint = next(n for n in res.next if n.startswith("most changes are"))
+    assert hint == (
+        "most changes are LINE on layer OLD-LINES (400): "
+        "consider `dump --layer OLD-LINES --type LINE`"
+    )
+
+
+def test_no_hint_when_no_group_dominates(fixtures_dir: Path, runs: Path) -> None:
+    res = run_cmd(
+        "diff", [str(fixtures_dir / "sheet_set_v1.dxf"), str(fixtures_dir / "plan_v2.dxf")], runs
+    )
+    assert not [n for n in res.next if n.startswith("most changes")]
+    assert res.summary["groups_total"] == 3 and len(res.summary["first_changes"]) == 3
+    kinds = {
+        (g["type"], tuple(k for k in ("removed", "changed", "moved") if g[k]))
+        for g in res.summary["groups"]
+    }
+    assert kinds == {
+        ("TEXT", ("changed",)),
+        ("LWPOLYLINE", ("moved",)),
+        ("CIRCLE", ("removed",)),
+    }
+
+
+def test_structural_changes_are_capped_at_three_in_the_sample() -> None:
+    structural = [{"description": f"layer L{i} added"} for i in range(8)]
+    changes = [
+        {"kind": "removed", "space": "model", "scope": "Model", "layer": f"A{i % 4}",
+         "type": "LINE", "description": f"LINE {i} on A{i % 4}"}
+        for i in range(30)
+    ]  # fmt: skip
+    first = diffing.pick_first_changes(structural, changes, 10)
+    assert first[:3] == ["layer L0 added", "layer L1 added", "layer L2 added"]
+    assert len(first) == 10 and len(set(first[3:])) == 7
+    assert {f.split()[-1] for f in first[3:]} == {"A0", "A1", "A2", "A3"}
+
+
+def test_two_hundred_groups_keep_the_json_under_the_cap(tmp_path: Path, runs: Path) -> None:
+    entities = []
+    for i in range(200):
+        e = _text(i + 1, float(i), 0.0, text=f"note {i}")
+        e["layer"] = f"VERY-LONG-LAYER-NAME-{i:03d}-" + "x" * 90
+        e["props"] = {**e["props"], "text": "t" * 150}
+        entities.append(e)
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text(json.dumps(_fp(entities)), encoding="utf-8")
+    b.write_text(json.dumps(_fp([])), encoding="utf-8")
+    res = run_cmd("diff", [str(a), str(b)], runs)
+    text = res.to_json()
+    assert len(text.encode("utf-8")) <= 4096
+    data = json.loads(text)
+    summary = data["summary"]
+    assert summary["groups_total"] == 200 and len(summary["groups"]) == 10
+    assert "top 10 of 200" in summary["groups_note"]
+    assert all(len(g["layer"]) <= 60 for g in summary["groups"])
+    assert len(summary["first_changes"]) == 10 and data["outputs"]["diff"]
+    full = json.loads(Path(res.outputs["diff"]["path"]).read_text("utf-8"))
+    assert len(full["groups"]) == 200
+    assert not [n for n in res.next if n.startswith("most changes")]  # 1 of 200: no dominant
+
+
+# --------------------------------------------------------------------------------------
+# an edited entity whose anchor drifts a little is one change, not removed + added
+# --------------------------------------------------------------------------------------
+
+
+def _ent(handle: int, x: float, y: float, text: str, layer: str = "0") -> dict[str, Any]:
+    e = _text(handle, x, y, text)
+    e["layer"] = layer
+    return e
+
+
+def _kinds(report: dict[str, Any]) -> list[str]:
+    return sorted(c["kind"] for c in report["changes"])
+
+
+def test_drifted_anchor_with_new_text_is_one_changed_entity() -> None:
+    a = _fp([_ent(0x4D4A, 723.6355, 16.8927, "2026-01-15"), _ent(1, 0, 0, "far")])
+    b = _fp([_ent(0x4D4A, 723.6355, 16.8935, "15 January 2026, final"), _ent(1, 0, 0, "far")])
+    report = diff_fingerprints(a, b)
+    assert _kinds(report) == ["changed"]
+    change = report["changes"][0]
+    fields = {x["field"]: x for x in change["changes"]}
+    assert fields["text"]["old"] == "2026-01-15" and fields["anchor"]["new"] == [723.6355, 16.8935]
+    assert change["handle"] == change["handle_b"] == "4D4A"
+    assert "text" in change["description"]
+
+
+def test_a_drifted_pair_with_different_handles_is_also_merged_when_very_close() -> None:
+    a = _fp([_ent(10, 100.0, 50.0, "old text")])
+    b = _fp([_ent(99, 100.004, 50.0, "new text")])
+    assert _kinds(diff_fingerprints(a, b)) == ["changed"]
+    c = _fp([_ent(99, 100.5, 50.0, "new text")])  # 0.5 away: unrelated
+    assert _kinds(diff_fingerprints(a, c)) == ["added", "removed"]
+
+
+def test_equal_handles_alone_do_not_pair_far_apart_entities() -> None:
+    near = _ent(5, 0.0, 0.0, "anchor")
+    far_a = _ent(7, 100.0, 100.0, "same handle, other place")
+    far_b = _ent(7, 5000.0, 4000.0, "elsewhere entirely")  # same handle: renumbered file
+    report = diff_fingerprints(_fp([near, far_a, _ent(8, 9000.0, 0.0, "x")]), _fp([near, far_b]))
+    assert "changed" not in _kinds(report)
+    assert _kinds(report).count("removed") == 2 and _kinds(report).count("added") == 1
+    # within 1% of the drawing extent a shared handle is enough (extent here ~ 9000: 90 units)
+    near_b = _ent(7, 150.0, 100.0, "moved a bit and edited")
+    report2 = diff_fingerprints(_fp([near, far_a, _ent(8, 9000.0, 0.0, "x")]), _fp([near, near_b]))
+    assert _kinds(report2).count("changed") == 1 and _kinds(report2).count("removed") == 1
+
+
+def test_type_and_layer_must_match_for_a_drift_pair() -> None:
+    a = _fp([_ent(3, 10.0, 10.0, "t", layer="A")])
+    other_layer = _fp([_ent(3, 10.0, 10.0008, "t2", layer="B")])
+    assert _kinds(diff_fingerprints(a, other_layer)) == ["added", "removed"]
+    mtext = _ent(3, 10.0, 10.0008, "t2", layer="A")
+    mtext["type"] = "MTEXT"
+    assert _kinds(diff_fingerprints(a, _fp([mtext]))) == ["added", "removed"]
+
+
+def test_drift_pairing_is_one_to_one_and_nearest_first() -> None:
+    a = _fp([_ent(1, 0.0, 0.0, "a1"), _ent(2, 0.004, 0.0, "a2")])
+    b = _fp([_ent(11, 0.001, 0.0, "b1")])
+    report = diff_fingerprints(a, b)
+    assert _kinds(report) == ["changed", "removed"]
+    changed = next(c for c in report["changes"] if c["kind"] == "changed")
+    assert changed["handle"] == "1"  # the nearer of the two
+
+
+def _sheet_with_drift(
+    fixtures_dir: Path, tmp_path: Path, handle: str, text: str
+) -> tuple[Path, Path]:
+    src = tmp_path / "base.dxf"
+    src.write_bytes((fixtures_dir / "sheet_set.dxf").read_bytes())
+    doc = ezdxf.readfile(src)
+    entity = doc.entitydb.get(handle)
+    entity.dxf.text = text
+    x, y, z = entity.dxf.insert
+    entity.dxf.insert = (x, y + 0.0008, z)
+    edited = tmp_path / "edited.dxf"
+    doc.saveas(edited)
+    return src, edited
+
+
+def test_title_block_text_with_other_width_and_shifted_insert_is_one_change(
+    fixtures_dir: Path, tmp_path: Path, runs: Path, truth: dict[str, Any]
+) -> None:
+    handle = truth["files"]["sheet_set.dxf"]["layouts"][0]["title_block"]["DATE"]["value_handle"]
+    src, edited = _sheet_with_drift(fixtures_dir, tmp_path, handle, "15 January 2026 (final)")
+    res = run_cmd("diff", [str(src), str(edited)], runs)
+    assert (res.summary["changed"], res.summary["removed"], res.summary["added"]) == (1, 0, 0)
+    assert res.summary["moved"] == 0
+
+
+def test_mtext_with_new_text_and_shifted_insert_is_one_change(
+    fixtures_dir: Path, tmp_path: Path, runs: Path, truth: dict[str, Any]
+) -> None:
+    handle = truth["files"]["mtext_cases.dxf"]["mtext"][0]["handle"]
+    src = tmp_path / "m.dxf"
+    src.write_bytes((fixtures_dir / "mtext_cases.dxf").read_bytes())
+    doc = ezdxf.readfile(src)
+    entity = doc.entitydb.get(handle)
+    entity.text = r"a much longer replacement\Pover two lines"
+    x, y, z = entity.dxf.insert
+    entity.dxf.insert = (x + 0.0006, y - 0.0008, z)
+    edited = tmp_path / "m2.dxf"
+    doc.saveas(edited)
+    res = run_cmd("diff", [str(src), str(edited)], runs)
+    assert (res.summary["changed"], res.summary["removed"], res.summary["added"]) == (1, 0, 0)
+
+
+@pytest.mark.parametrize("drift", [False, True])
+def test_edit_verifies_when_cad_style_drift_follows_a_replace_text(
+    fixtures_dir: Path,
+    tmp_path: Path,
+    runs: Path,
+    truth: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    drift: bool,
+) -> None:
+    import hashlib
+
+    from cadlib import edit, fingerprint
+
+    handle = truth["files"]["sheet_set.dxf"]["layouts"][0]["title_block"]["DATE"]["value_handle"]
+    src = tmp_path / "sheet_set.dxf"
+    src.write_bytes((fixtures_dir / "sheet_set.dxf").read_bytes())
+    if drift:  # what CAD does: the insertion point moves after the string changes
+        real = fingerprint.build_fingerprint
+        calls: list[int] = []
+
+        def drifting(loaded: Any, ctx: Any, deadline: Any) -> Any:
+            fp = real(loaded, ctx, deadline)
+            calls.append(1)
+            if len(calls) == 2:  # the edited copy
+                for e in fp["entities"]:
+                    if e["handle"] == handle:
+                        e["anchor"] = [e["anchor"][0], round(e["anchor"][1] + 0.0008, 4)]
+                        e["sig"] = util._hash([e["shape"], e["anchor"]])
+            return fp
+
+        monkeypatch.setattr(edit, "build_fingerprint", drifting)
+    spec = {
+        "version": 1,
+        "base": {"path": str(src), "sha1": hashlib.sha1(src.read_bytes()).hexdigest()},
+        "edits": [
+            {
+                "id": "date",
+                "op": "replace-text",
+                "handle": handle,
+                "expect": {"type": "TEXT", "text": "2026-01-15"},
+                "args": {"old": "2026-01-15", "new": "15 January 2026 (final)"},
+            }
+        ],
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    edit.COMMANDS["edit"].add_arguments(parser)
+    res = edit.COMMANDS["edit"].run(
+        parser.parse_args(["--spec", str(spec_path), "--run-dir", str(runs)])
+    )
+    assert res.summary["verified"] is True and res.summary["unintended"] == 0, res.warnings

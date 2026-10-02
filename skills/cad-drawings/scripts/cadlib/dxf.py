@@ -9,13 +9,20 @@ from pathlib import Path
 from typing import Any
 
 from .command import Command
-from .diffing import DIFF_JSON_CAP, SUMMARY_CHANGES, diff_fingerprints
+from .diffing import (
+    DIFF_JSON_CAP,
+    SUMMARY_CHANGES,
+    diff_fingerprints,
+    dominant_hint,
+    pick_first_changes,
+    summary_groups,
+)
 from .drawing import Loaded, _resolve_source, open_drawing
 from .drawing_info import build_info
 from .entities import Loc, describe, expect_for, iter_locations
 from .fingerprint import _fingerprint_of, build_fingerprint
 from .printing import DocModel
-from .result import CadError, Result
+from .result import MAX_JSON_BYTES, CadError, Result
 from .search import _WHERE, MAX_PATTERN_CHARS, MAX_SUBJECT_CHARS, compile_pattern, find_hits
 from .util import (
     Deadline,
@@ -310,8 +317,8 @@ def _run_diff(args: argparse.Namespace) -> Result:
     path = ctx.path("diff.json")
     _write_json(path, report)
     ctx.add_output(result, "diff", path)
-    all_changes = report["structural"] + report["changes"]
-    first = [c["description"] for c in all_changes[:SUMMARY_CHANGES]]
+    first = pick_first_changes(report["structural"], report["changes"], SUMMARY_CHANGES)
+    groups, groups_note = summary_groups(report["groups"])
     if report["truncated"]:
         result.warn(f"diff.json lists the first {DIFF_JSON_CAP} changes; use --full for all")
     result.summary = {
@@ -319,13 +326,40 @@ def _run_diff(args: argparse.Namespace) -> Result:
         "structural": len(report["structural"]),
         "identical": report["total_changes"] == 0,
         "noise": report["noise"],
+        "groups": groups,
+        "groups_total": len(report["groups"]),
         "first_changes": first,
     }
+    if groups_note:
+        result.summary["groups_note"] = groups_note
     if report["counts"]["removed"] or report["counts"]["added"]:
         result.next.append(
             "added/removed items are unmatched, not explained: confirm with the author"
         )
-    return _finish(result, ctx)
+    hint = dominant_hint(report["groups"], sum(report["counts"].values()))
+    if hint:
+        result.next.append(hint)
+    _finish(result, ctx)
+    _fit_summary(result)
+    return result
+
+
+def _fit_summary(result: Result) -> None:
+    """Drop the tail of the sampled changes, then of the groups, until the JSON fits the cap
+    (long paths and layer names must not push the whole summary out)."""
+
+    def size() -> int:
+        return len(json.dumps(result.to_dict(), ensure_ascii=False).encode("utf-8"))
+
+    summary = result.summary
+    while size() > MAX_JSON_BYTES and len(summary["first_changes"]) > 3:
+        summary["first_changes"].pop()
+    total = summary["groups_total"]
+    while size() > MAX_JSON_BYTES and len(summary["groups"]) > 3:
+        summary["groups"].pop()
+        summary["groups_note"] = (
+            f"top {len(summary['groups'])} of {total} groups; the full table is in diff.json"
+        )
 
 
 def _add_diff_args(p: argparse.ArgumentParser) -> None:
