@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 MIN_PYTHON = (3, 10)
-MIN_VERSIONS = {"ezdxf": "1.4.4", "pywin32": "312", "pypdfium2": "5"}
+MIN_VERSIONS = {"ezdxf": "1.4.4", "pywin32": "312", "pypdfium2": "5", "matplotlib": "3.8"}
 # distribution name -> (required for the core skill, only meaningful on Windows)
 PACKAGES: dict[str, tuple[bool, bool]] = {
     "ezdxf": (True, False),
@@ -154,11 +154,19 @@ def install_options(platform: str | None = None) -> dict[str, list[str]]:
         "ezdxf": [f'{pip} "ezdxf>={MIN_VERSIONS["ezdxf"]}"'],
         "pypdfium2": [f'{pip} "pypdfium2>={MIN_VERSIONS["pypdfium2"]}"'],
         "pywin32": [f'{pip} "pywin32>={MIN_VERSIONS["pywin32"]}"'],
-        "drawing": [f"{pip} matplotlib pillow"],
         "oda": oda,
         "libredwg": libredwg,
         "cad": cad,
     }
+
+
+def pip_install(names: Sequence[str], platform: str | None = None) -> list[str]:
+    """One ``pip install`` command for the given distributions (minimum versions applied)."""
+    if not names:
+        return []
+    py = "python" if _platform_key(platform) == "win32" else "python3"
+    specs = [f'"{n}>={MIN_VERSIONS[n]}"' if n in MIN_VERSIONS else n for n in names]
+    return [f"{py} -m pip install " + " ".join(specs)]
 
 
 def converter_install_hint(platform: str | None = None) -> str:
@@ -408,6 +416,124 @@ def probe_com_instance(starter: Callable[[], Any] | None = None) -> dict[str, An
 # --------------------------------------------------------------------------------------
 
 
+def default_runs_base() -> Path:
+    """Where ``cadlib.runs`` keeps run directories (same resolution, nothing is created)."""
+    env = os.environ.get("CAD_DRAWINGS_RUNS")
+    if env:
+        return Path(env).expanduser().absolute()
+    tmp = Path(tempfile.gettempdir()).absolute()
+    if os.name == "posix":
+        return tmp / f"cad-drawings-runs-{os.getuid()}"
+    return tmp / "cad-drawings-runs"
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = wintypes.DWORD()
+            ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)  # POSIX: signal 0 only checks existence
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _image_of_pid(pid: int) -> str | None:
+    """Executable name of a running process (None when gone), to catch a reused PID."""
+    try:
+        if sys.platform == "win32":
+            proc = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=SUBPROCESS_TIMEOUT_S,
+                check=False,
+            )
+            line = next((ln for ln in proc.stdout.splitlines() if ln.startswith('"')), "")
+            fields = [f.strip('"') for f in line.split('","')]
+            return fields[0] if len(fields) > 1 and fields[1] == str(pid) else None
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=SUBPROCESS_TIMEOUT_S,
+            check=False,
+        )
+        return proc.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _read_record(path: Path) -> dict[str, Any] | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def find_orphans(base: Path | None = None, limit: int = 10) -> list[dict[str, Any]]:
+    """CAD processes that a dead run or lock owner started and that still run (never killed).
+
+    ``cadlib.runs.note_child`` records children in a run's ``status.json`` and in lock files; a
+    child counts only when its owner is gone and a process with that PID and image still exists.
+    """
+    root = Path(base) if base is not None else default_runs_base()
+    records: list[tuple[str, dict[str, Any]]] = []
+    if root.is_dir():
+        for status in sorted(root.glob("*/status.json")):
+            data = _read_record(status)
+            if data is not None:
+                records.append((status.parent.name, data))
+        for lock in sorted((root / "locks").glob("*.lock")):
+            data = _read_record(lock)
+            if data is not None:
+                records.append((lock.name, data))
+    found: dict[int, dict[str, Any]] = {}
+    for label, data in records:
+        owner = data.get("pid")
+        if isinstance(owner, int) and _pid_alive(owner):
+            continue
+        for child in data.get("children") or []:
+            pid = child.get("pid") if isinstance(child, dict) else None
+            image = str(child.get("image", "")) if isinstance(child, dict) else ""
+            if not isinstance(pid, int) or pid in found or not _pid_alive(pid):
+                continue
+            running_image = _image_of_pid(pid)
+            if running_image is None or running_image.lower() != image.lower():
+                continue  # the PID was reused by an unrelated process
+            found[pid] = {
+                "pid": pid,
+                "image": image,
+                "role": str(child.get("role", "cad")),
+                "run": label,
+            }
+            if len(found) >= limit:
+                return list(found.values())
+    return list(found.values())
+
+
 @dataclass
 class Environment:
     platform: str
@@ -422,6 +548,7 @@ class Environment:
     xvfb: str | None = None
     display: bool = True
     com_probe: dict[str, Any] | None = None
+    orphans: list[dict[str, Any]] = field(default_factory=list)
 
 
 def gather_environment(*, probe_com: bool = False) -> Environment:
@@ -441,6 +568,7 @@ def gather_environment(*, probe_com: bool = False) -> Environment:
         free_gb=free,
         xvfb=(shutil.which("Xvfb") or shutil.which("xvfb-run")) if key == "linux" else None,
         display=has_display() if key == "linux" else True,
+        orphans=find_orphans(),
     )
     if probe_com:
         env.com_probe = probe_com_instance()
@@ -465,7 +593,6 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
     ezdxf_state = package_state("ezdxf", pk.get("ezdxf"))
     pdfium_state = package_state("pypdfium2", pk.get("pypdfium2"))
     pywin_state = package_state("pywin32", pk.get("pywin32"))
-    has_draw = bool(pk.get("matplotlib") or pk.get("pillow"))
     host = next((h for h in env.hosts if h.get("exe_exists")), None)
     com_host = bool(host) and env.platform == "win32"
     com_ready = com_host and pywin_state == "ok"
@@ -494,7 +621,9 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         )
     elif com_ready:
         caps["read_dwg"] = _cap(
-            STATUS_AVAILABLE, "com", note="starts a private CAD instance; ask the user first"
+            STATUS_AVAILABLE,
+            "com",
+            note="starts a CAD instance: ask the user, then use --allow-com",
         )
     elif oda_ok:
         caps["read_dwg"] = _cap(STATUS_AVAILABLE, "oda")
@@ -510,22 +639,41 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         warnings.append(f"CAD host registered but pywin32 is {pywin_state}; COM is unavailable")
         caps["read_dwg"].setdefault("install", opts["pywin32"])
 
-    # render for viewing
-    if com_ready and pdfium_state == "ok":
-        caps["render"] = _cap(STATUS_AVAILABLE, "com+pypdfium2")
-    elif ezdxf_state == "ok" and has_draw:
-        install = opts["pypdfium2"] if pdfium_state != "ok" else []
+    # render for viewing: the ezdxf path needs ezdxf + Pillow + matplotlib; PDF -> PNG (and the
+    # COM path) needs pypdfium2
+    draw_missing = [
+        n for n in ("ezdxf", "pillow", "matplotlib") if package_state(n, pk.get(n)) != "ok"
+    ]
+    pdf_ok = pdfium_state == "ok"
+    if not draw_missing and pdf_ok:
+        caps["render"] = (
+            _cap(STATUS_AVAILABLE, "com+pypdfium2")
+            if com_ready
+            else _cap(
+                STATUS_AVAILABLE, "ezdxf", note="approximate: no plot styles, substitute fonts"
+            )
+        )
+    elif not draw_missing:
         caps["render"] = _cap(
-            STATUS_DEGRADED, "ezdxf", install, "approximate: no plot styles, substitute fonts"
+            STATUS_DEGRADED,
+            "ezdxf",
+            pip_install(["pypdfium2"], env.platform),
+            "approximate drawing; the PDF/COM path needs pypdfium2",
+        )
+    elif com_ready and pdf_ok:
+        caps["render"] = _cap(
+            STATUS_DEGRADED,
+            "com+pypdfium2",
+            pip_install(draw_missing, env.platform),
+            "the ezdxf fallback is unavailable",
         )
     else:
-        caps["render"] = _cap(
-            STATUS_MISSING, None, ez_install + opts["drawing"] + opts["pypdfium2"]
-        )
+        missing = draw_missing + ([] if pdf_ok else ["pypdfium2"])
+        caps["render"] = _cap(STATUS_MISSING, None, pip_install(missing, env.platform))
 
-    # DWG <-> DXF conversion: both directions need a backend (COM writes DXF only)
+    # DWG <-> DXF conversion: both directions need a backend
     reader = dict(caps["read_dwg"])
-    writer_ok = oda_ok or bool(env.libredwg.get("dxf2dwg"))
+    writer_ok = com_ready or oda_ok or bool(env.libredwg.get("dxf2dwg"))
     if reader["status"] == STATUS_AVAILABLE and not writer_ok:
         reader["status"] = STATUS_DEGRADED
         reader["note"] = "dwg->dxf only; dxf->dwg needs ODA File Converter or LibreDWG"
@@ -585,6 +733,13 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         summary["xvfb"] = bool(env.xvfb)
     if any(h["product"] != "AutoCAD" for h in env.hosts):
         warnings.append("non-AutoCAD COM hosts are detected but their API parity is untested")
+    summary["orphans"] = env.orphans[:5]
+    if env.orphans:
+        pids = ", ".join(str(o["pid"]) for o in env.orphans[:5])
+        warnings.append(
+            f"{len(env.orphans)} CAD process(es) left behind by crashed runs (pid {pids}); "
+            "they were not stopped"
+        )
     if env.com_probe is not None:
         summary["com_probe"] = env.com_probe
     return summary, warnings

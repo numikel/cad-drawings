@@ -15,7 +15,7 @@
     "exit_code": {
       "type": "integer",
       "enum": [0, 1, 2, 3, 4, 5, 6, 7],
-      "description": "0 ok, 1 error, 2 bad arguments, 3 missing dependency or backend, 4 resource busy (lock, document open elsewhere), 5 timeout, 6 edit precondition not met, 7 partial success."
+      "description": "0 ok, 1 error, 2 bad arguments, 3 missing dependency or backend, 4 resource busy (lock, document open elsewhere), 5 timeout, 6 precondition not met (target exists, empty layout, stale edit base, ...), 7 partial success."
     },
     "backend": {
       "type": "string",

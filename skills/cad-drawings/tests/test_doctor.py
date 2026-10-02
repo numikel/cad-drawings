@@ -72,7 +72,7 @@ def test_package_state() -> None:
     assert std.package_state("ezdxf", None) == "missing"
     assert std.package_state("ezdxf", "1.3.0") == "old"
     assert std.package_state("ezdxf", "1.4.4") == "ok"
-    assert std.package_state("matplotlib", "0.1") == "ok"  # no minimum
+    assert std.package_state("jsonschema", "0.1") == "ok"  # no minimum
 
 
 # -- capability matrix ----------------------------------------------------------------------
@@ -127,7 +127,7 @@ def test_registered_host_whose_exe_is_gone_is_not_counted() -> None:
 def test_oda_gives_dwg_reading_without_a_cad() -> None:
     c = caps(make_env(oda="oda.exe"))
     assert (c["read_dwg"]["status"], c["read_dwg"]["via"]) == ("available", "oda")
-    assert c["render"]["status"] == "degraded" and c["render"]["via"] == "ezdxf"
+    assert c["render"]["status"] == "available" and c["render"]["via"] == "ezdxf"
     assert (c["convert"]["status"], c["convert"]["via"]) == ("available", "oda")
 
 
@@ -140,9 +140,14 @@ def test_libredwg_only_is_degraded_and_proposes_oda() -> None:
     assert both["convert"]["status"] == "degraded" and "r2004" in both["convert"]["note"]
 
 
-def test_com_alone_converts_one_way_only() -> None:
+def test_com_converts_both_ways() -> None:
     c = caps(make_env(hosts=[AUTOCAD]))
-    assert c["convert"]["status"] == "degraded" and "dxf->dwg" in c["convert"]["note"]
+    assert (c["convert"]["status"], c["convert"]["via"]) == ("available", "com")
+
+
+def test_libredwg_dwg2dxf_alone_converts_one_way_only() -> None:
+    c = caps(make_env("linux", libredwg={"dwg2dxf": "a"}))
+    assert c["convert"]["status"] == "degraded" and c["read_dwg"]["status"] == "degraded"
 
 
 def test_linux_oda_without_display_or_xvfb_is_not_usable() -> None:
@@ -271,7 +276,7 @@ def test_detection_never_installs_or_starts_anything(monkeypatch: pytest.MonkeyP
 
     def fake_run(argv: Any, *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
         calls.append(list(argv))
-        assert argv[0] in ("tasklist", "pgrep"), argv
+        assert argv[0] in ("tasklist", "pgrep", "ps"), argv
         return subprocess.CompletedProcess(argv, 1, "", "")
 
     def forbidden(*a: Any, **kw: Any) -> None:
@@ -415,3 +420,99 @@ def test_cadlib_wrapper_exposes_the_command_and_shared_helpers() -> None:
     assert result.exit_code == ExitCode.OK and "capabilities" in result.summary
     SCHEMA.validate(json.loads(result.to_json()))
     assert parser.parse_args(["--probe-com"]).probe_com is True
+
+
+# -- hardening: render matrix, install hints, orphans ---------------------------------------
+
+
+def test_render_is_available_only_with_the_whole_stack() -> None:
+    c = caps(make_env("linux"))
+    assert c["render"]["status"] == "available" and "install" not in c["render"]
+    for missing in ("pillow", "matplotlib"):
+        c = caps(make_env("linux", packages=dict(FULL, **{missing: None})))
+        assert c["render"]["status"] == "missing", missing
+        assert any(missing in cmd for cmd in c["render"]["install"])
+
+
+def test_render_without_pypdfium2_degrades_instead_of_failing() -> None:
+    c = caps(make_env("linux", packages=dict(FULL, pypdfium2=None)))
+    assert c["render"]["status"] == "degraded"
+    assert any("pypdfium2" in cmd for cmd in c["render"]["install"])
+
+
+def test_old_matplotlib_is_not_enough() -> None:
+    assert std.MIN_VERSIONS["matplotlib"] == "3.8"
+    c = caps(make_env("linux", packages=dict(FULL, matplotlib="3.7.5")))
+    assert c["render"]["status"] == "missing"
+    assert any("matplotlib>=3.8" in cmd for cmd in c["render"]["install"])
+
+
+def test_com_render_survives_without_the_ezdxf_stack_but_says_so() -> None:
+    packages = dict(FULL, matplotlib=None)
+    c = caps(make_env(hosts=[AUTOCAD], packages=packages))
+    assert c["render"]["status"] == "degraded" and c["render"]["via"] == "com+pypdfium2"
+    assert any("matplotlib" in cmd for cmd in c["render"]["install"])
+
+
+def test_install_hints_only_name_what_is_actually_missing() -> None:
+    c = caps(make_env("linux", packages=dict(FULL, pillow=None)))
+    hints = " ".join(c["render"]["install"])
+    assert "pillow" in hints and "matplotlib" not in hints and "ezdxf" not in hints
+    assert "install" not in caps(make_env("linux"))["read_dxf"]
+
+
+def test_orphans_are_children_of_dead_runs_that_still_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    run_dir = tmp_path / "20260101-000000-edit-ab12"
+    run_dir.mkdir()
+    child = {"pid": __import__("os").getpid(), "image": "python.exe", "role": "cad", "started": "t"}
+    (run_dir / "status.json").write_text(
+        json.dumps({"pid": dead.pid, "state": "running", "children": [child]}), encoding="utf-8"
+    )
+    alive_run = tmp_path / "20260101-000001-edit-cd34"
+    alive_run.mkdir()
+    (alive_run / "status.json").write_text(
+        json.dumps({"pid": __import__("os").getpid(), "state": "running", "children": [child]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(std, "_image_of_pid", lambda pid: "python.exe")
+    found = std.find_orphans(tmp_path)
+    assert [o["pid"] for o in found] == [child["pid"]]
+    assert found[0]["run"] == run_dir.name and found[0]["image"] == "python.exe"
+
+
+def test_orphan_with_a_reused_pid_is_not_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    run_dir = tmp_path / "20260101-000000-edit-ab12"
+    run_dir.mkdir()
+    child = {"pid": __import__("os").getpid(), "image": "acad.exe", "role": "cad", "started": "t"}
+    (run_dir / "status.json").write_text(
+        json.dumps({"pid": dead.pid, "state": "running", "children": [child]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(std, "_image_of_pid", lambda pid: "notepad.exe")
+    assert std.find_orphans(tmp_path) == []
+
+
+def test_orphans_are_listed_in_the_summary() -> None:
+    orphan = {"pid": 4242, "image": "acad.exe", "role": "cad", "run": "r1"}
+    summary, warnings = std.assess(make_env(orphans=[orphan]))
+    assert summary["orphans"] == [orphan] and any("4242" in w for w in warnings)
+    summary, _ = std.assess(make_env())
+    assert summary["orphans"] == []
+
+
+def test_runs_base_resolution_matches_the_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadlib import runs
+
+    monkeypatch.delenv("CAD_DRAWINGS_RUNS", raising=False)
+    assert std.default_runs_base() == runs.runs_base()
+    monkeypatch.setenv("CAD_DRAWINGS_RUNS", str(tmp_path))
+    assert std.default_runs_base() == runs.runs_base() == tmp_path

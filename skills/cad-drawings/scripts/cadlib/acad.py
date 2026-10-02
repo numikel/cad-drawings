@@ -50,10 +50,10 @@ import contextlib
 import csv
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
@@ -109,6 +109,8 @@ VIEWER_WARNING = (
 )
 
 MIN_FREE_GB = 5.0
+OP_TIMEOUT = 90.0  # per COM operation (open, save, plot, start) before the watchdog acts
+_WATCHDOG_GRACE = 10.0
 _MAX_SCAN_BYTES = 200 * 1024 * 1024
 
 
@@ -361,43 +363,96 @@ def _kill_pid(pid: int) -> None:
     _taskkill(["/PID", str(pid), "/F", "/T"])
 
 
-def _free_gb(path: Path) -> float:
-    probe = path
-    while not probe.exists() and probe != probe.parent:
-        probe = probe.parent
-    return shutil.disk_usage(probe).free / 1e9
-
-
 def preflight_disk(path: Path, min_gb: float = MIN_FREE_GB) -> None:
-    """Delegate to ``runs.preflight_disk``; local equivalent until that module exists."""
-    try:
-        from .runs import preflight_disk as impl
-    except ImportError:
-
-        def impl(p: Path, min_gb: float = MIN_FREE_GB) -> None:
-            free = _free_gb(p)
-            if free < min_gb:
-                raise CadError(
-                    "DISK_LOW",
-                    f"only {free:.1f} GB free on the drive of {p} (need {min_gb:g} GB)",
-                    exit_code=ExitCode.BUSY,
-                    hint="free disk space or choose another output location",
-                )
+    """``runs.preflight_disk`` (imported lazily so this module loads without it)."""
+    from .runs import preflight_disk as impl
 
     impl(path, min_gb)
 
 
 def _com_lock() -> contextlib.AbstractContextManager[None]:
-    try:
-        from .runs import acquire_lock
-    except ImportError:
-        return contextlib.nullcontext()
+    from .runs import acquire_lock
+
     return acquire_lock("com")
+
+
+def _note_child(pid: int, image: str) -> None:
+    """Record the CAD process in the run bookkeeping so ``cleanup`` can find an orphan."""
+    from .runs import note_child
+
+    note_child(pid, image, "cad")
+
+
+def _assign_job(pid: int) -> tuple[Any, str | None]:
+    """Put the process into a kill-on-close Job Object owned by this Python process.
+
+    Returns ``(job handle, None)`` or ``(None, reason)``: best effort, never raises. Keeping
+    the handle open for the life of the session makes Windows terminate the CAD process when
+    this process dies (for example killed by a host timeout in the middle of a plot).
+    """
+    try:
+        import win32api
+        import win32con
+        import win32job
+
+        job = win32job.CreateJobObject(None, "")
+        info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+        info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
+        access = win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE
+        handle = win32api.OpenProcess(access, False, pid)
+        try:
+            win32job.AssignProcessToJobObject(job, handle)
+        finally:
+            win32api.CloseHandle(handle)
+        return job, None
+    except Exception as exc:  # noqa: BLE001 - best effort by design
+        return None, (
+            f"the CAD process could not be tied to this process (job object: {exc}); "
+            "if this process is killed the CAD instance may stay running"
+        )
 
 
 def normalize_path(path: str | os.PathLike[str]) -> str:
     """Key for comparing documents: absolute, symlinks resolved, case-folded on Windows."""
     return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
+
+
+def _dxf_save_type(version: str) -> int:
+    save_type = SAVEAS_DXF.get(version)
+    if save_type is None:
+        raise CadError(
+            "BAD_ARGS",
+            f"unsupported DXF version {version!r}",
+            exit_code=ExitCode.BAD_ARGS,
+            hint="use one of " + ", ".join(sorted(SAVEAS_DXF)),
+        )
+    return save_type
+
+
+def _validate_plot_args(layout: str, dst: Path, page_setup: dict[str, Any] | None) -> None:
+    unknown = set(page_setup or {}) - _PAGE_SETUP_KEYS
+    if unknown:
+        raise CadError(
+            "BAD_ARGS",
+            f"unknown page_setup keys: {', '.join(sorted(unknown))}",
+            exit_code=ExitCode.BAD_ARGS,
+            hint="allowed: " + ", ".join(sorted(_PAGE_SETUP_KEYS)),
+        )
+    if layout.lower() == "model":
+        raise CadError(
+            "PRECONDITION_FAILED",
+            "plotting model space directly can produce an empty PDF",
+            exit_code=ExitCode.PRECONDITION_FAILED,
+            hint="plot a paper-space layout (create one with a viewport if needed)",
+        )
+    if dst.exists():
+        raise CadError(
+            "DEST_EXISTS",
+            f"{dst.name} already exists and PlotToFile never overwrites",
+            exit_code=ExitCode.PRECONDITION_FAILED,
+            hint="plot into a fresh run directory",
+        )
 
 
 def _temp_sibling(dst: Path, suffix: str) -> Path:
@@ -561,7 +616,12 @@ def _app_pid(app: Any) -> int | None:
 
 # --- documents ----------------------------------------------------------------------------------
 class Doc:
-    """A document opened by an ``AcadSession``; ``close()`` is idempotent."""
+    """A document opened by an ``AcadSession``; ``close()`` is idempotent.
+
+    Entity handles read through a Doc are valid only for the file version in which they were
+    read: saving, re-saving or converting can renumber them, so never carry handles from one
+    version of a file to another (match by content instead).
+    """
 
     def __init__(self, session: AcadSession, raw: Any, path: Path) -> None:
         self.session = session
@@ -574,10 +634,82 @@ class Doc:
         if self.closed:
             return
         if save:
-            raise CadError("BAD_ARGS", "saving through Doc.close is not supported")
+            raise CadError(
+                "BAD_ARGS", "saving through Doc.close is not supported", exit_code=ExitCode.BAD_ARGS
+            )
         retry_expr(lambda: self.raw.Close(False))
         self.closed = True
         self.session._forget(self)
+
+    def export_dxf(
+        self, dst: Path, version: str = "2013", *, activate_layouts: bool = True
+    ) -> list[str]:
+        """Save this open document as DXF straight to ``dst``; returns warnings.
+
+        ``dst`` must not exist. SaveAs rebinds the document to ``dst`` and keeps that file
+        locked: the document now IS the DXF, so close it (do not edit or save it further), and
+        a partial file after a failure can only be removed once it is closed. Every paper-space
+        layout is activated first (and the original tab restored) because a layout that was
+        never current exports its viewports with status 0; the written file is scanned and any
+        viewport with status <= 0 is reported in the warnings.
+        """
+        save_type = _dxf_save_type(version)
+        dst = Path(dst)
+        if dst.exists():
+            raise CadError(
+                "DEST_EXISTS",
+                f"{dst.name} already exists",
+                exit_code=ExitCode.PRECONDITION_FAILED,
+                hint="export into a fresh run directory",
+            )
+        _preflight_outputs(dst)
+        started = time.time()
+        session = self.session
+        with session.sysvars(self, ISAVEBAK=0, ISAVEPERCENT=0):
+            if activate_layouts:
+                session._activate_all_layouts(self)
+            with session._deadline("SaveAs"):
+                retry_expr(lambda: self.raw.SaveAs(str(dst), save_type))
+        _verify_fresh(dst, started)
+        return session._viewport_warnings(dst)
+
+    def plot_layout_pdf(
+        self, layout: str, dst: Path, *, page_setup: dict[str, Any] | None = None
+    ) -> list[str]:
+        """Plot one layout of this open document to a single-page PDF at ``dst``.
+
+        See ``AcadSession.plot_layout_pdf``. The page setup is applied in memory to this
+        document, so close it without saving afterwards. The document stays open and usable.
+        """
+        _validate_plot_args(layout, Path(dst), page_setup)
+        dst = Path(dst)
+        session = self.session
+        _preflight_outputs(dst)
+        started = time.time()
+        warnings: list[str] = [VIEWER_WARNING]
+        try:
+            with session.sysvars(self, BACKGROUNDPLOT=0, ISAVEBAK=0, ISAVEPERCENT=0):
+                lay, lay_name = session._find_layout(self, layout)
+                retry_expr(lambda: self.raw.Activate())
+                retry_expr(lambda: self.raw.SetVariable("CTAB", lay_name))
+                media = session._configure_plot(lay, page_setup or {}, warnings)
+                with contextlib.suppress(Exception):
+                    self.raw.Plot.QuietErrorMode = True
+                with session._deadline("PlotToFile"):
+                    ok = retry_expr(lambda: self.raw.Plot.PlotToFile(str(dst)))
+                if not ok:
+                    raise CadError(
+                        "PLOT_FAILED",
+                        f"PlotToFile returned False for layout {lay_name!r}",
+                        hint="check the layout has a PDF plotter and a valid media; "
+                        "pass page_setup with device and media",
+                    )
+            _verify_fresh(dst, started)
+            warnings += session._verify_pdf(dst, media)
+        except BaseException:
+            _unlink(dst)  # did not exist before this call, so it is ours (may fail if viewed)
+            raise
+        return warnings
 
     def __enter__(self) -> Doc:  # noqa: PYI034
         return self
@@ -599,7 +731,9 @@ class AcadSession:
         disp: Any = None,
         stack: contextlib.ExitStack | None = None,
         log: Callable[[str], None] | None = None,
+        op_timeout: float = OP_TIMEOUT,
     ) -> None:
+        self.op_timeout = op_timeout
         self._app = app
         self._disp = disp
         self.pid = pid  # type: ignore[assignment]
@@ -610,8 +744,10 @@ class AcadSession:
         self._stack = stack or contextlib.ExitStack()
         self._log = log or (lambda message: None)
         self._docs: list[Doc] = []
-        self._dwl: set[Path] = set()  # lock files this session created
+        self._dwl: dict[Path, float] = {}  # lock files created by our Open -> open time
         self._unhealthy = False
+        self._dead = False  # the watchdog terminated the process
+        self._job: Any = None
         self._finished = False
 
     # -- construction -----------------------------------------------------------------------
@@ -621,13 +757,17 @@ class AcadSession:
         progid: str | None = None,
         *,
         visible: bool = False,
-        timeout: float = 120.0,
+        timeout: float = OP_TIMEOUT,
         lock: bool = True,
         log: Callable[[str], None] | None = None,
+        op_timeout: float = OP_TIMEOUT,
     ) -> AcadSession:
         """Start a dedicated instance and wait until it accepts calls.
 
-        Refuses (``CadError`` BUSY) when no single new PID can be attributed to it.
+        Refuses (``CadError`` BUSY) when no single new PID can be attributed to it. The process is
+        recorded for ``cleanup`` and, best effort, tied to this process with a kill-on-close Job
+        Object (a warning says when that was refused). ``timeout`` bounds the start; a watchdog
+        terminates the new process (only that PID) if a call blocks past it.
         """
         _com()  # fail early and clearly on unsupported platforms
         emit = log or (lambda message: None)
@@ -658,7 +798,16 @@ class AcadSession:
                     hint="; ".join(failures[:3]) or "no ProgID is registered (run doctor)",
                 )
             pid = cls._attribute_pid(app, _image_for(chosen), before, min(timeout, 20.0))
-            session = cls(app, pid=pid, progid=chosen, owned=True, disp=disp, stack=stack, log=emit)
+            session = cls(
+                app,
+                pid=pid,
+                progid=chosen,
+                owned=True,
+                disp=disp,
+                stack=stack,
+                log=emit,
+                op_timeout=op_timeout,
+            )
         except BaseException:
             stack.close()
             raise
@@ -667,9 +816,11 @@ class AcadSession:
             session.warnings.append(
                 f"{chosen} is not AutoCAD: COM support is experimental and unverified"
             )
+        session._register_child()
         try:
-            session._app_call(lambda a: setattr(a, "Visible", visible))
-            session._wait_quiescent(timeout)
+            with session._deadline("start", timeout + _WATCHDOG_GRACE):
+                session._app_call(lambda a: setattr(a, "Visible", visible))
+                session._wait_quiescent(timeout)
         except BaseException:
             with contextlib.suppress(Exception):
                 session.quit(timeout=30.0)
@@ -687,20 +838,28 @@ class AcadSession:
 
         _wait_until(found, timeout, interval=0.5)
         owner = _app_pid(app)
-        refusal = CadError(
-            "BUSY",
-            "cannot attribute a new CAD process to this session; refusing to continue",
-            exit_code=ExitCode.BUSY,
-            hint="the host may be reusing a running instance (single-instance application) "
-            "or tasklist is unavailable; nothing was closed",
-        )
-        if owner is not None:
-            if owner in new:
-                return owner
-            raise refusal  # the application window belongs to a process we did not start
-        if len(new) == 1:
+        if owner is not None and owner in new:
+            return owner
+        if owner is None and len(new) == 1:
             return next(iter(new))
-        raise refusal
+        if new:
+            # something new is running but cannot be attributed: it is hidden and still alive
+            candidates = ", ".join(str(p) for p in sorted(new))
+            err = CadError(
+                "BUSY",
+                "cannot attribute the new CAD process to this session; a CAD instance started "
+                f"by this call is still running (candidate PIDs: {candidates})",
+                exit_code=ExitCode.BUSY,
+                hint="close it from the Task Manager or ask the user; this tool did not close it",
+            )
+            err.candidate_pids = sorted(new)  # type: ignore[attr-defined]
+            raise err
+        raise CadError(
+            "BUSY",
+            "no new CAD process appeared: the host reused a running instance, which was left alone",
+            exit_code=ExitCode.BUSY,
+            hint="single-instance hosts cannot get a dedicated session; nothing was closed",
+        )
 
     @classmethod
     def attach_guarded(
@@ -760,12 +919,90 @@ class AcadSession:
         if message not in self.warnings:
             self.warnings.append(message)
 
+    def _register_child(self) -> None:
+        try:
+            _note_child(self.pid, self.image)  # type: ignore[arg-type]
+        except ImportError:
+            pass  # runs.note_child not available: nothing to record
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not stop the session
+            self._warn(f"could not record the CAD process for cleanup: {exc}")
+        self._job, reason = _assign_job(self.pid)  # type: ignore[arg-type]
+        if reason:
+            self._warn(reason)
+
+    def _terminate_own(self) -> bool:
+        """Close, then force-terminate, only the process this session started."""
+        if not self.owned or self.pid is None or not self._alive():
+            return True
+        _close_pid(self.pid)
+        if _wait_until(lambda: not self._alive(), _WATCHDOG_GRACE):
+            return True
+        _kill_pid(self.pid)
+        return _wait_until(lambda: not self._alive(), _WATCHDOG_GRACE)
+
+    @contextlib.contextmanager
+    def _deadline(self, what: str, limit: float | None = None) -> Iterator[None]:
+        """Watchdog for one blocking COM operation.
+
+        If it has not finished after ``limit`` seconds, a thread terminates this session's own
+        process (never any other PID); the blocked call then fails and the operation raises
+        ``CadError("TIMEOUT")``. The session is unusable afterwards except ``quit()``.
+        Sessions that did not start their instance (guarded attach) have no watchdog: the
+        user's process is never terminated.
+        """
+        if self._dead:
+            raise self._timeout_error(what, 0.0)
+        if not self.owned or self.pid is None:
+            yield
+            return
+        seconds = self.op_timeout if limit is None else limit
+        done = threading.Event()
+        fired = threading.Event()
+
+        def watch() -> None:
+            if done.wait(seconds):
+                return
+            self._dead = True
+            fired.set()
+            self._warn(f"{what} did not finish in {seconds:g}s; terminating pid {self.pid}")
+            self._terminate_own()
+
+        thread = threading.Thread(target=watch, name="cad-watchdog", daemon=True)
+        thread.start()
+        try:
+            yield
+        except Exception as exc:
+            done.set()
+            thread.join(3 * _WATCHDOG_GRACE)
+            if fired.is_set():
+                raise self._timeout_error(what, seconds) from exc
+            raise
+        else:
+            done.set()
+            thread.join(3 * _WATCHDOG_GRACE)
+            if fired.is_set():
+                raise self._timeout_error(what, seconds)
+        finally:
+            done.set()
+
+    def _timeout_error(self, what: str, seconds: float) -> CadError:
+        return CadError(
+            "TIMEOUT",
+            f"{what} did not finish within {seconds:g}s; the CAD process {self.pid} started by "
+            "this session was terminated",
+            exit_code=ExitCode.TIMEOUT,
+            hint="retry; a very large drawing or a modal dialog in CAD can block a call",
+        )
+
     def _refresh_app(self) -> None:
         """Re-wrap the original IDispatch: a stale late-bound proxy raises AttributeError."""
         if self._disp is not None:
             self._app = _wrap(self._disp)
 
     def _app_call(self, expr: Callable[[Any], T], **kw: Any) -> T:
+        if self._dead:
+            raise self._timeout_error("CAD call", 0.0)
+
         def attempt() -> T:
             try:
                 return expr(self._app)
@@ -844,13 +1081,21 @@ class AcadSession:
         self._idle()
         dwl = [path.with_suffix(".dwl"), path.with_suffix(".dwl2")]
         preexisting = {p for p in dwl if p.exists()}
-        raw = self._app_call(lambda a: a.Documents.Open(str(path), readonly))
+        opened_at = time.time()
+        with self._deadline("Documents.Open"):
+            raw = self._app_call(lambda a: a.Documents.Open(str(path), readonly))
         doc = Doc(self, raw, path)
         self._docs.append(doc)
-        self._dwl.update(p for p in dwl if p not in preexisting)
+        # Ours only if absent before the Open and present right after it.
+        for lock in dwl:
+            if lock not in preexisting and lock.exists():
+                self._dwl[lock] = opened_at
         return doc
 
     def _close_all_docs(self) -> None:
+        if self._dead:  # the process is gone; nothing to close
+            self._docs.clear()
+            return
         for doc in list(self._docs):
             try:
                 doc.close()
@@ -894,39 +1139,21 @@ class AcadSession:
     ) -> list[str]:
         """Save ``src`` as DXF at ``dst`` (replacing it atomically). Returns warnings.
 
-        ``src`` should be a staged copy; it is opened read-only and closed again. With
-        ``activate_layouts`` every paper-space layout is made current before ``SaveAs`` (and
-        the original tab restored) because a layout never activated in this session can export
-        its viewports with an unreliable status. The written file is checked for viewports
-        with status <= 0 and any are reported in the returned warnings.
+        ``src`` should be a staged copy; it is opened read-only, exported through
+        ``Doc.export_dxf`` to a temporary name beside ``dst`` and closed before the move.
         """
-        save_type = SAVEAS_DXF.get(version)
-        if save_type is None:
-            raise CadError(
-                "BAD_ARGS",
-                f"unsupported DXF version {version!r}",
-                exit_code=ExitCode.BAD_ARGS,
-                hint="use one of " + ", ".join(sorted(SAVEAS_DXF)),
-            )
+        _dxf_save_type(version)
         src, dst = Path(src), Path(dst)
-        _preflight_outputs(dst)
-        started = time.time()
         tmp = _temp_sibling(dst, ".dxf")
-        warnings: list[str] = []
         doc = self.open(src, readonly=True)
         try:
-            with self.sysvars(doc, ISAVEBAK=0, ISAVEPERCENT=0):
-                if activate_layouts:
-                    self._activate_all_layouts(doc)
-                retry_expr(lambda: doc.raw.SaveAs(str(tmp), save_type))
+            warnings = doc.export_dxf(tmp, version, activate_layouts=activate_layouts)
         except BaseException:
             self._close_quietly(doc)
             _unlink(tmp)
             raise
         self._close_quietly(doc)
         try:
-            _verify_fresh(tmp, started)
-            warnings += self._viewport_warnings(tmp)
             os.replace(tmp, dst)
         except BaseException:
             _unlink(tmp)
@@ -1001,12 +1228,13 @@ class AcadSession:
     ) -> list[str]:
         """Plot one layout of ``src`` to a single-page PDF at ``dst``. Returns warnings.
 
-        A fresh document is opened for each call. Without ``page_setup`` the layout's own setup
-        is used, except that a layout without a usable PDF device (typical for layouts derived
-        from DXF) gets the built-in PDF plotter and the closest ISO media; that is reported.
-        ``page_setup`` keys: ``device``, ``media`` (canonical name), ``plot_area`` (display,
-        extents, limits, view, window, layout), ``window`` (x1, y1, x2, y2), ``scale`` ("fit",
-        a number, or "paper:drawing" like "1:50"), ``rotation`` (0/90/180/270), ``style_sheet``.
+        A fresh document is opened for each call (thin wrapper over ``Doc.plot_layout_pdf``).
+        Without ``page_setup`` the layout's own setup is used, except that a layout without a
+        usable PDF device (typical for layouts derived from DXF) gets the built-in PDF plotter
+        and the closest ISO media; that is reported. ``page_setup`` keys: ``device``, ``media``
+        (canonical name), ``plot_area`` (display, extents, limits, view, window, layout),
+        ``window`` (x1, y1, x2, y2), ``scale`` ("fit", a number, or "paper:drawing" like
+        "1:50"), ``rotation`` (0/90/180/270), ``style_sheet``.
 
         ``dst`` must not exist (``PlotToFile`` never overwrites): use a fresh run directory.
         The plot is written straight to ``dst`` and never renamed or moved during the call,
@@ -1014,54 +1242,13 @@ class AcadSession:
         (see the module docstring); a viewer launched on a temporary name that is then moved
         shows the user a "file not found" error. The returned warnings always say so.
         """
-        unknown = set(page_setup or {}) - _PAGE_SETUP_KEYS
-        if unknown:
-            raise CadError(
-                "BAD_ARGS",
-                f"unknown page_setup keys: {', '.join(sorted(unknown))}",
-                exit_code=ExitCode.BAD_ARGS,
-                hint="allowed: " + ", ".join(sorted(_PAGE_SETUP_KEYS)),
-            )
-        if layout.lower() == "model":
-            raise CadError(
-                "PRECONDITION_FAILED",
-                "plotting model space directly can produce an empty PDF",
-                exit_code=ExitCode.PRECONDITION_FAILED,
-                hint="plot a paper-space layout (create one with a viewport if needed)",
-            )
         src, dst = Path(src), Path(dst)
-        if dst.exists():
-            raise CadError(
-                "DEST_EXISTS",
-                f"{dst.name} already exists and PlotToFile never overwrites",
-                exit_code=ExitCode.PRECONDITION_FAILED,
-                hint="plot into a fresh run directory",
-            )
-        _preflight_outputs(dst)
-        started = time.time()
-        warnings: list[str] = [VIEWER_WARNING]
+        _validate_plot_args(layout, dst, page_setup)
         doc = self.open(src, readonly=True)
         try:
-            with self.sysvars(doc, BACKGROUNDPLOT=0, ISAVEBAK=0, ISAVEPERCENT=0):
-                lay, lay_name = self._find_layout(doc, layout)
-                retry_expr(lambda: doc.raw.Activate())
-                retry_expr(lambda: doc.raw.SetVariable("CTAB", lay_name))
-                media = self._configure_plot(lay, page_setup or {}, warnings)
-                with contextlib.suppress(Exception):
-                    doc.raw.Plot.QuietErrorMode = True
-                ok = retry_expr(lambda: doc.raw.Plot.PlotToFile(str(dst)))
-                if not ok:
-                    raise CadError(
-                        "PLOT_FAILED",
-                        f"PlotToFile returned False for layout {lay_name!r}",
-                        hint="check the layout has a PDF plotter and a valid media; "
-                        "pass page_setup with device and media",
-                    )
-            _verify_fresh(dst, started)
-            warnings += self._verify_pdf(dst, media)
+            warnings = doc.plot_layout_pdf(layout, dst, page_setup=page_setup)
         except BaseException:
             self._close_quietly(doc)
-            _unlink(dst)  # did not exist before this call, so it is ours (may fail if viewed)
             raise
         self._close_quietly(doc)
         return warnings
@@ -1148,14 +1335,22 @@ class AcadSession:
     def _apply_page_options(self, lay: Any, ps: dict[str, Any]) -> None:
         if "rotation" in ps:
             if ps["rotation"] not in _ROTATIONS:
-                raise CadError("BAD_ARGS", "rotation must be 0, 90, 180 or 270")
+                raise CadError(
+                    "BAD_ARGS",
+                    "rotation must be 0, 90, 180 or 270",
+                    exit_code=ExitCode.BAD_ARGS,
+                )
             retry_expr(lambda: setattr(lay, "PlotRotation", _ROTATIONS[ps["rotation"]]))
         if "style_sheet" in ps:
             retry_expr(lambda: setattr(lay, "StyleSheet", str(ps["style_sheet"])))
         if "plot_area" in ps:
             area = str(ps["plot_area"]).lower()
             if area not in _PLOT_TYPES:
-                raise CadError("BAD_ARGS", f"plot_area must be one of {sorted(_PLOT_TYPES)}")
+                raise CadError(
+                    "BAD_ARGS",
+                    f"plot_area must be one of {sorted(_PLOT_TYPES)}",
+                    exit_code=ExitCode.BAD_ARGS,
+                )
             if area == "window":
                 x1, y1, x2, y2 = (float(v) for v in ps["window"])
                 retry_expr(
@@ -1212,6 +1407,7 @@ class AcadSession:
         finally:
             if gone:
                 self._remove_dwl()
+                self._close_job()
             self._stack.close()
         if not gone:
             raise CadError(
@@ -1227,8 +1423,11 @@ class AcadSession:
     def _shutdown_process(self, timeout: float) -> bool:
         graceful = min(timeout * 0.2, 10.0) if self._unhealthy else timeout * 0.5
         try:
-            self._refresh_app()
-            self._app_call(lambda a: a.Quit(), tries=4, base_delay=0.5)
+            if self._dead:
+                graceful = 5.0  # the watchdog already terminated it; just confirm
+            else:
+                self._refresh_app()
+                self._app_call(lambda a: a.Quit(), tries=4, base_delay=0.5)
         except CadError as exc:
             if not (isinstance(exc, ComError) and exc.hresult in GONE_HRESULTS):
                 self._warn(f"Quit call failed: {exc.message}")
@@ -1247,9 +1446,22 @@ class AcadSession:
         return _wait_until(lambda: not self._alive(), max(10.0, timeout * 0.25))
 
     def _remove_dwl(self) -> None:
-        for path in self._dwl:
-            _unlink(path)
+        """Delete lock files this session's Open created (and only those, and only if unchanged
+        since: an mtime older than the Open means it is not the file we saw appear)."""
+        for path, opened_at in self._dwl.items():
+            try:
+                if path.stat().st_mtime >= opened_at - 2.0:
+                    path.unlink()
+            except OSError:
+                continue
         self._dwl.clear()
+
+    def _close_job(self) -> None:
+        """Release the kill-on-close job; only after the process is gone."""
+        job, self._job = self._job, None
+        if job is not None:
+            with contextlib.suppress(Exception):
+                job.Close()
 
     def __enter__(self) -> AcadSession:  # noqa: PYI034
         return self
@@ -1271,8 +1483,10 @@ def _parse_scale(scale: Any) -> tuple[float, float]:
             paper, drawing = float(scale), 1.0
     except (TypeError, ValueError) as exc:
         raise CadError(
-            "BAD_ARGS", f"scale must be 'fit', a number or 'paper:drawing', got {scale!r}"
+            "BAD_ARGS",
+            f"scale must be 'fit', a number or 'paper:drawing', got {scale!r}",
+            exit_code=ExitCode.BAD_ARGS,
         ) from exc
     if paper <= 0 or drawing <= 0:
-        raise CadError("BAD_ARGS", "scale values must be positive")
+        raise CadError("BAD_ARGS", "scale values must be positive", exit_code=ExitCode.BAD_ARGS)
     return paper, drawing

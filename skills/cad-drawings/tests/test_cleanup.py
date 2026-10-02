@@ -231,3 +231,66 @@ def test_non_ascii_base_and_files(tmp_path: Path) -> None:
     assert listing["summary"]["listed"][0]["id"] == ctx.dir.name
     res, _ = run_cmd("--run", ctx.dir.name, "--yes", "--run-dir", str(base))
     assert res.exit_code == 0 and not ctx.dir.exists()
+
+
+# -- hardening ------------------------------------------------------------------------------
+
+
+def dead_pid() -> int:
+    import subprocess
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "nan", "inf", "abc"])
+def test_older_than_must_be_a_positive_number(value: str, tmp_path: Path) -> None:
+    parser = argparse.ArgumentParser()
+    p = parser.add_subparsers(dest="command").add_parser("cleanup")
+    cl.COMMANDS["cleanup"].add_arguments(p)
+    with pytest.raises(SystemExit):
+        parser.parse_args(["cleanup", "--older-than", value])
+
+
+def test_older_than_is_also_checked_for_programmatic_callers(tmp_path: Path) -> None:
+    args = argparse.Namespace(
+        list=False,
+        older_than=-1.0,
+        run=[],
+        cache=False,
+        orphans=None,
+        yes=True,
+        dry_run=False,
+        run_dir=str(tmp_path),
+    )
+    with pytest.raises(CadError) as err:
+        cl.COMMANDS["cleanup"].run(args)
+    assert err.value.code == "BAD_ARGS"
+
+
+def _set_status(ctx: RunContext, **fields: object) -> None:
+    status = ctx.dir / "status.json"
+    data = json.loads(status.read_text("utf-8"))
+    data.update(fields)
+    status.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_running_with_a_dead_owner_counts_as_failed_and_can_be_deleted(tmp_path: Path) -> None:
+    ctx = make_run(tmp_path, age_days=3)
+    _set_status(ctx, state="running", pid=dead_pid())
+    _, listing = run_cmd("--list", "--run-dir", str(tmp_path))
+    item = listing["summary"]["listed"][0]
+    assert item["state"] == "failed" and "active" not in item
+    res, _ = run_cmd("--older-than", "1", "--yes", "--run-dir", str(tmp_path))
+    assert res.exit_code == 0 and not ctx.dir.exists()
+
+
+def test_running_with_a_live_owner_is_never_touched_even_with_an_old_heartbeat(
+    tmp_path: Path,
+) -> None:
+    ctx = make_run(tmp_path, age_days=3)
+    stamp = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat(timespec="seconds")
+    _set_status(ctx, state="running", pid=os.getpid(), updated=stamp)
+    _, data = run_cmd("--older-than", "1", "--yes", "--run-dir", str(tmp_path))
+    assert ctx.dir.exists() and any("still running" in w for w in data["warnings"])

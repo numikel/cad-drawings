@@ -5,20 +5,28 @@ newer than the start of the call, and (for DXF) open with ``ezdxf.recover``. Eve
 to a staging file in the run directory and is moved to the destination only after it verified.
 
 ``--backend`` other than ``auto`` is exclusive (no silent fallback: the caller asked for it).
+COM starts a CAD application, so it is used only with ``allow_com`` (``--allow-com``) or when it
+is requested explicitly; otherwise ODA / LibreDWG are tried and, when none exists, the error
+tells the agent to ask the user first. Outputs are written to a temp file beside the target and
+moved with ``os.replace``; an output that is the same file as an input is refused.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import os
+import re
+import secrets
 import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from . import doctor as _doctor
 from .command import Command
@@ -29,12 +37,14 @@ from .runs import (
     cache_get,
     cache_put,
     file_sha1,
+    note_child,
     preflight_disk,
+    stage_copy_report,
 )
 
 FORMATS = ("dxf", "dwg")
 BACKENDS = ("auto", "com", "oda", "libredwg")
-DEFAULT_TIMEOUT_S = 240.0
+DEFAULT_TIMEOUT_S = 100.0  # below typical host command limits; long jobs: background + status.json
 ODA_VERSION = "ACAD2018"
 LIBREDWG_DWG_VERSION = "r2004"
 APPROX_WARNING = (
@@ -92,53 +102,70 @@ def _non_ascii(*paths: Path) -> bool:
 
 @dataclass
 class ComConverter:
-    """Native export through a CAD application (COM, Windows). Delegates to ``cadlib.acad``."""
+    """Native export through a CAD application (COM, Windows). Delegates to ``cadlib.acad``.
 
-    exporter: Callable[[Path, Path], None] | None = None  # injected by tests
+    The source is always staged into the run directory first; the original is never opened.
+    ``session`` (an existing ``AcadSession``) is used as is and left running; otherwise a private
+    instance is started and quit around each conversion. ``session_factory`` is a test hook.
+    """
+
+    session: Any = None
+    session_factory: Callable[[], Any] | None = None
     timeout: float = DEFAULT_TIMEOUT_S
     name: str = "com"
     approximate: bool = False
-    formats: tuple[str, ...] = ("dxf",)
+    formats: tuple[str, ...] = ("dxf", "dwg")
 
-    def _resolve(self) -> tuple[Callable[[Path, Path], None] | None, str]:
-        if self.exporter is not None:
-            return self.exporter, "injected"
+    def available(self) -> tuple[bool, str]:
+        if self.session is not None or self.session_factory is not None:
+            return True, "injected"
         if os.name != "nt":
-            return None, "COM needs Windows"
+            return False, "COM needs Windows"
         try:
             from . import acad
         except ImportError:
-            return None, "acad module missing"
+            return False, "acad module missing"
         if not any(h.get("exe_exists") for h in _doctor.detect_cad_hosts()):
-            return None, "no COM-capable CAD application registered"
-        export = getattr(acad, "export_dxf", None)
-        if callable(export):
-            return export, "ok"
-        session_cls = getattr(acad, "AcadSession", None)
-        if session_cls is None:
-            return None, "acad module has no export function"
+            return False, "no COM-capable CAD application registered"
+        if getattr(acad, "AcadSession", None) is None:
+            return False, "acad module has no session class"
+        return True, "ok"
 
-        def via_session(src: Path, dst: Path) -> None:
-            with session_cls.start() as session:
-                session.export_dxf(src, dst)
+    @contextlib.contextmanager
+    def _open_session(self) -> Iterator[Any]:
+        if self.session is not None:
+            yield self.session
+            return
+        if self.session_factory is not None:
+            manager = self.session_factory()
+        else:
+            from .acad import AcadSession
 
-        return via_session, "ok"
-
-    def available(self) -> tuple[bool, str]:
-        export, why = self._resolve()
-        return export is not None, why
+            manager = AcadSession.start(timeout=self.timeout)
+        with manager as started:
+            pid = getattr(started, "pid", None)
+            if isinstance(pid, int):
+                note_child(pid, str(getattr(started, "image", "cad")))
+            yield started
 
     def convert(self, src: Path, dst: Path, fmt: str, ctx: RunContext) -> list[str]:
-        export, why = self._resolve()
-        if export is None:
+        ok, why = self.available()
+        if not ok:
             raise CadError("NO_BACKEND", f"COM backend unavailable: {why}")
-        if fmt != "dxf":
+        if fmt not in self.formats:
             raise CadError(
-                "UNSUPPORTED", "the COM backend only writes DXF", exit_code=ExitCode.BAD_ARGS
+                "BAD_ARGS", f"the COM backend cannot write {fmt}", exit_code=ExitCode.BAD_ARGS
             )
-        ctx.log(f"com: exporting {src.name} to DXF through the CAD application")
-        export(src, dst)
-        return []
+        report = stage_copy_report(src, ctx)  # never open the original
+        warnings = list(report.skipped)
+        ctx.log(f"com: converting {src.name} to {fmt.upper()} through the CAD application")
+        with self._open_session() as session:
+            if fmt == "dxf":
+                warnings += list(session.export_dxf(report.path, dst) or [])
+            else:
+                doc = session.open(report.path, readonly=True)
+                warnings += list(session.save_dwg(doc, dst) or [])
+        return warnings
 
 
 @dataclass
@@ -287,12 +314,81 @@ def verify_output(path: Path, fmt: str, started: float) -> list[str]:
         import ezdxf
         from ezdxf import recover
     except ImportError:
-        return ["ezdxf is not installed: the converted DXF could not be verified"]
+        _check_dxf_structure(path)
+        return ["ezdxf is not installed: the converted DXF was only checked structurally"]
     try:
         recover.readfile(str(path))
     except (ezdxf.DXFError, OSError) as exc:
         raise CadError("OUTPUT_INVALID", f"converted DXF does not open: {exc}") from exc
     return []
+
+
+def _check_dxf_structure(path: Path) -> None:
+    """Without ezdxf: a DXF starts with a SECTION (or the binary sentinel) and ends with EOF."""
+    with path.open("rb") as fh:
+        head = fh.read(64)
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - 512))
+        tail = fh.read()
+    if head.startswith(b"AutoCAD Binary DXF"):
+        return
+    if not re.match(rb"\s*0\r?\n\s*SECTION", head) or b"EOF" not in tail:
+        raise CadError("OUTPUT_INVALID", "output does not look like a DXF file")
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        if a.exists() and b.exists() and os.path.samefile(a, b):
+            return True
+    except OSError:
+        pass
+    return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+
+
+def reject_overlap(dst: Path, *inputs: Path) -> None:
+    """Refuse an output path that is a directory or the same file as any input."""
+    dst = Path(dst)
+    if dst.is_dir():
+        raise CadError(
+            "BAD_ARGS",
+            f"output path is a directory: {dst}",
+            exit_code=ExitCode.BAD_ARGS,
+            hint="give a file name",
+        )
+    for item in inputs:
+        if _same_path(dst, Path(item)):
+            raise CadError(
+                "BAD_ARGS",
+                f"output path is the same file as an input: {dst}",
+                exit_code=ExitCode.BAD_ARGS,
+                hint="choose a different --out; inputs are never overwritten",
+            )
+
+
+def _place(stage: Path, dst: Path) -> None:
+    """Move a verified file to ``dst`` atomically (a temp beside the target across volumes)."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.replace(stage, dst)
+        return
+    except OSError:
+        pass  # another volume (or a transient lock): copy beside the target, then replace
+    _copy_atomic(stage, dst)
+    with contextlib.suppress(OSError):
+        stage.unlink()
+
+
+def _copy_atomic(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}.{secrets.token_hex(3)}.tmp")
+    try:
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dst)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 # -- policy ---------------------------------------------------------------------------------
@@ -314,14 +410,43 @@ def _select_pool(
     return pool
 
 
-def _no_backend(fmt: str, skipped: list[str]) -> CadError:
+def _no_backend(fmt: str, skipped: list[str], com_blocked: bool = False) -> CadError:
     detail = "; ".join(skipped) if skipped else "none configured"
+    hint = _doctor.converter_install_hint()
+    if com_blocked:
+        hint = (
+            "a CAD application is installed and can convert, but it starts an instance: ask the "
+            "user, then rerun with --allow-com. Alternatively: " + hint
+        )
     return CadError(
         "NO_BACKEND",
         f"no converter can write {fmt.upper()} here ({detail})",
         exit_code=ExitCode.MISSING_DEPENDENCY,
-        hint=_doctor.converter_install_hint(),
+        hint=hint,
     )
+
+
+def _candidates(
+    pool: list[Converter], fmt: str, com_ok: bool
+) -> tuple[list[Converter], list[str], bool]:
+    """Usable backends in priority order, the reasons others were skipped, and whether a
+    working COM host was left out only because nobody allowed it."""
+    candidates: list[Converter] = []
+    skipped: list[str] = []
+    com_blocked = False
+    for conv in pool:
+        if fmt not in conv.formats:
+            skipped.append(f"{conv.name}: cannot write {fmt}")
+            continue
+        ok, why = conv.available()
+        if not ok:
+            skipped.append(f"{conv.name}: {why}")
+        elif conv.name == "com" and not com_ok:
+            com_blocked = True
+            skipped.append("com: not used without --allow-com (it starts a CAD instance)")
+        else:
+            candidates.append(conv)
+    return candidates, skipped, com_blocked
 
 
 def convert(
@@ -332,12 +457,14 @@ def convert(
     prefer: str | None = None,
     ctx: RunContext,
     converters: list[Converter] | None = None,
+    allow_com: bool = False,
     timeout: float = DEFAULT_TIMEOUT_S,
 ) -> tuple[Converter, list[str]]:
     """Convert ``src`` to ``dst`` (``fmt`` = dxf|dwg) with the first backend that works.
 
-    Falls back com -> oda -> libredwg when a backend fails or its output does not verify. A
-    non-auto ``prefer`` uses only that backend. ``converters`` injects backends (tests).
+    Falls back com -> oda -> libredwg when a backend fails or its output does not verify. COM is
+    skipped unless ``allow_com`` or ``prefer == "com"``. A non-auto ``prefer`` uses only that
+    backend. ``converters`` injects backends (tests). ``dst`` must not be an input.
     """
     fmt = fmt.lower()
     src, dst = Path(src), Path(dst)
@@ -349,20 +476,11 @@ def convert(
         raise CadError(
             "FILE_NOT_FOUND", f"source file not found: {src}", exit_code=ExitCode.BAD_ARGS
         )
+    reject_overlap(dst, src)
     pool = _select_pool(converters, prefer, timeout)
-    candidates: list[Converter] = []
-    skipped: list[str] = []
-    for conv in pool:
-        if fmt not in conv.formats:
-            skipped.append(f"{conv.name}: cannot write {fmt}")
-            continue
-        ok, why = conv.available()
-        if ok:
-            candidates.append(conv)
-        else:
-            skipped.append(f"{conv.name}: {why}")
+    candidates, skipped, com_blocked = _candidates(pool, fmt, allow_com or prefer == "com")
     if not candidates:
-        raise _no_backend(fmt, skipped)
+        raise _no_backend(fmt, skipped, com_blocked)
 
     failures: list[tuple[Converter, CadError]] = []
     for conv in candidates:
@@ -381,11 +499,7 @@ def convert(
             ctx.log(f"{conv.name} failed: {exc}")
             failures.append((conv, CadError("CONVERT_FAILED", f"{type(exc).__name__}: {exc}")))
             continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.replace(stage, dst)
-        except OSError:  # another volume
-            shutil.move(str(stage), dst)
+        _place(stage, dst)
         fallbacks = [f"{c.name} failed ({e.message})" for c, e in failures]
         if fallbacks:
             warnings.insert(0, "; ".join(fallbacks) + f"; used {conv.name}")
@@ -395,11 +509,12 @@ def convert(
 
     if len(failures) == 1:
         raise failures[0][1]
-    codes = {e.exit_code for _, e in failures}
+    codes = {e.code for _, e in failures}
+    same = len(codes) == 1
     raise CadError(
-        "CONVERT_FAILED",
+        codes.pop() if same else "CONVERT_FAILED",
         "; ".join(f"{c.name}: {e.message}" for c, e in failures),
-        exit_code=codes.pop() if len(codes) == 1 else ExitCode.ERROR,
+        exit_code=failures[0][1].exit_code if same else ExitCode.ERROR,
         hint="see the run log; try another --backend",
     )
 
@@ -417,21 +532,32 @@ def ensure_dxf(
     src: Path,
     ctx: RunContext,
     *,
+    allow_com: bool = False,
     prefer: str | None = None,
+    session: Any = None,
     base: Path | None = None,
     converters: list[Converter] | None = None,
     timeout: float = DEFAULT_TIMEOUT_S,
 ) -> DxfResult:
     """A DXF for ``src``: the source itself when it is DXF, else a cached or fresh conversion.
 
-    The cache key is ``sha1(source)`` plus the converter id, so an edited source never hits a
-    stale entry. The returned cache path must be treated as read-only.
+    The one conversion policy for every command: ODA / LibreDWG, and COM only with
+    ``allow_com`` (or ``prefer == "com"``, or an existing ``session``, which is used as is and
+    left running). COM never opens the original (it is staged first); all backend warnings are
+    returned. The cache key is ``sha1(source)`` plus the converter id, so an edited source never
+    hits a stale entry; a cached DXF is returned without starting anything. The returned cache
+    path must be treated as read-only.
     """
     src = Path(src)
     if src.suffix.lower() == ".dxf":
         return DxfResult(src, None)
     digest = file_sha1(src)
     pool = _select_pool(converters, prefer, timeout)
+    if session is not None:
+        pool = [
+            dataclasses.replace(c, session=session) if isinstance(c, ComConverter) else c
+            for c in pool
+        ]
     for conv in pool:
         hit = cache_get(digest, conv.name, base=base)
         if hit is not None:
@@ -440,7 +566,14 @@ def ensure_dxf(
             return DxfResult(hit, conv.name, conv.approximate, True, warnings)
     target = ctx.path(f"converted/{src.stem}.dxf")
     conv, warnings = convert(
-        src, target, "dxf", prefer=prefer, ctx=ctx, converters=pool, timeout=timeout
+        src,
+        target,
+        "dxf",
+        prefer=prefer,
+        ctx=ctx,
+        converters=pool,
+        allow_com=allow_com or session is not None,
+        timeout=timeout,
     )
     cache_put(digest, conv.name, target, base=base)
     return DxfResult(target, conv.name, conv.approximate, False, warnings)
@@ -458,23 +591,28 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--overwrite", action="store_true", help="replace an existing --out file")
     parser.add_argument(
-        "--timeout", type=float, default=DEFAULT_TIMEOUT_S, help="seconds per backend"
+        "--allow-com",
+        action="store_true",
+        help="allow starting a CAD application (COM); ask the user first. --backend com implies it",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_TIMEOUT_S,
+        help=(
+            "seconds per backend (default 100, below typical host command limits); for longer "
+            "jobs run the command in the background and poll status.json in the run directory"
+        ),
     )
     parser.add_argument("--dry-run", action="store_true", help="show the plan, write nothing")
     parser.add_argument("--run-dir", help="base directory for run directories")
 
 
-def _plan(pool: list[Converter], fmt: str) -> tuple[Converter | None, list[str]]:
-    skipped: list[str] = []
-    for conv in pool:
-        if fmt not in conv.formats:
-            skipped.append(f"{conv.name}: cannot write {fmt}")
-            continue
-        ok, why = conv.available()
-        if ok:
-            return conv, skipped
-        skipped.append(f"{conv.name}: {why}")
-    return None, skipped
+def _plan(
+    pool: list[Converter], fmt: str, com_ok: bool
+) -> tuple[Converter | None, list[str], bool]:
+    candidates, skipped, com_blocked = _candidates(pool, fmt, com_ok)
+    return (candidates[0] if candidates else None), skipped, com_blocked
 
 
 def _run(args: argparse.Namespace) -> Result:
@@ -495,6 +633,9 @@ def _run(args: argparse.Namespace) -> Result:
     if suffix == ".dwg" and fmt == "dwg":
         raise CadError("BAD_ARGS", "the source already is a DWG", exit_code=ExitCode.BAD_ARGS)
     out = Path(args.out) if args.out else None
+    if out is not None:
+        reject_overlap(out, src)
+    com_ok = bool(args.allow_com) or args.backend == "com"
     result = Result(command="convert")
 
     if suffix == ".dxf" and fmt == "dxf":  # nothing to convert
@@ -509,8 +650,7 @@ def _run(args: argparse.Namespace) -> Result:
             result.summary["dry_run"] = True
             return result
         ctx = RunContext.create("convert", Path(args.run_dir) if args.run_dir else None)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, out)
+        _copy_atomic(src, out)
         ctx.add_output(result, "output", out, source=src)
         ctx.finish()
         return result
@@ -519,9 +659,9 @@ def _run(args: argparse.Namespace) -> Result:
         raise _exists(out)
     pool = _select_pool(None, args.backend, args.timeout)
     if args.dry_run:
-        conv, skipped = _plan(pool, fmt)
+        conv, skipped, com_blocked = _plan(pool, fmt, com_ok)
         if conv is None:
-            raise _no_backend(fmt, skipped)
+            raise _no_backend(fmt, skipped, com_blocked)
         result.backend = conv.name
         result.approximate = conv.approximate
         result.summary = {"dry_run": True, "would_use": conv.name, "skipped": skipped}
@@ -534,9 +674,16 @@ def _run(args: argparse.Namespace) -> Result:
     ctx.log(f"convert {src} -> {fmt} (backend {args.backend})")
     try:
         if fmt == "dxf":
-            found = ensure_dxf(src, ctx, prefer=args.backend, converters=pool, timeout=args.timeout)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(found.path, dst)
+            found = ensure_dxf(
+                src,
+                ctx,
+                allow_com=com_ok,
+                prefer=args.backend,
+                converters=pool,
+                timeout=args.timeout,
+            )
+            reject_overlap(dst, src, found.path)
+            _copy_atomic(found.path, dst)
             backend, approximate, cached, warnings = (
                 found.backend,
                 found.approximate,
@@ -545,7 +692,14 @@ def _run(args: argparse.Namespace) -> Result:
             )
         else:
             conv, warnings = convert(
-                src, dst, fmt, prefer=args.backend, ctx=ctx, converters=pool, timeout=args.timeout
+                src,
+                dst,
+                fmt,
+                prefer=args.backend,
+                ctx=ctx,
+                converters=pool,
+                allow_com=com_ok,
+                timeout=args.timeout,
             )
             backend, approximate, cached = conv.name, conv.approximate, False
     except CadError:
@@ -578,6 +732,7 @@ COMMANDS = {
         epilog=(
             "Examples:\n  cad.py convert plan.dwg --to dxf\n"
             "  cad.py convert plan.dxf --to dwg --out out/plan.dwg --backend oda\n"
+            "  cad.py convert plan.dwg --to dxf --allow-com   (starts a CAD instance; ask first)\n"
             "Exit codes: 0 ok, 3 no converter (see hint), 4 busy, 5 timeout, 6 --out exists."
         ),
     )

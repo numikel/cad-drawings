@@ -8,9 +8,11 @@ is in progress: ``pytest -m com skills/cad-drawings/tests/test_acad.py``. Their 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -131,6 +133,8 @@ class FakeDocuments:
 
     def Open(self, path: str, readonly: bool) -> FakeRawDoc:
         assert readonly is True
+        if self.app.open_hook:
+            self.app.open_hook()
         raw = self.next_open or FakeRawDoc(path, self.app.events)
         raw.FullName = path
         raw.events = self.app.events
@@ -148,6 +152,7 @@ class FakeApp:
         self.Visible: Any = None
         self.create_on_open: list[str] = []
         self.quit_error: Exception | None = None
+        self.open_hook: Any = None
 
     def GetAcadState(self) -> FakeState:
         return FakeState()
@@ -412,6 +417,10 @@ def start_env(monkeypatch: pytest.MonkeyPatch, clock: Clock) -> SimpleNamespace:
     monkeypatch.setattr(acad, "_list_pids", list_pids)
     monkeypatch.setattr(acad, "_create_app", create)
     monkeypatch.setattr(acad, "_app_pid", lambda app: env.owner)
+    env.noted = []
+    env.job = (object(), None)
+    monkeypatch.setattr(acad, "_note_child", lambda pid, image: env.noted.append((pid, image)))
+    monkeypatch.setattr(acad, "_assign_job", lambda pid: env.job)
     return env
 
 
@@ -566,7 +575,7 @@ def test_quit_reports_a_process_that_survives_everything(
     lock = tmp_path / "x.dwl"
     lock.write_text("lock")
     session = make_session(app)
-    session._dwl.add(lock)
+    session._dwl[lock] = time.time() - 1
     with pytest.raises(CadError) as info:
         session.quit(timeout=20)
     assert info.value.code == "TIMEOUT" and info.value.exit_code == ExitCode.TIMEOUT
@@ -1232,3 +1241,375 @@ def test_com_session_end_to_end(
     assert not acad._list_pids(image), "an acad.exe was left running"
     assert pid not in acad._list_pids(image)
     assert not list(out.glob("*.dwl*")) and not list(out.glob("*.part.*"))
+
+
+# --- hardening: orphan protection, watchdog, lock ownership, messages ----------------------------
+
+
+def test_start_default_timeout_is_90() -> None:
+    import inspect
+
+    params = inspect.signature(acad.AcadSession.start).parameters
+    assert params["timeout"].default == 90.0 and params["op_timeout"].default == 90.0
+
+
+def test_start_records_child_and_ties_it_to_a_job(start_env: SimpleNamespace) -> None:
+    session = acad.AcadSession.start(timeout=30)
+    assert start_env.noted == [(2, "acad.exe")]
+    assert session._job is start_env.job[0] and not session.warnings
+
+
+def test_start_survives_a_refused_job_assignment(start_env: SimpleNamespace) -> None:
+    start_env.job = (None, "the CAD process could not be tied to this process (job object: x)")
+    session = acad.AcadSession.start(timeout=30)
+    assert session.pid == 2 and session._job is None
+    assert any("could not be tied" in w for w in session.warnings)
+
+
+def test_start_tolerates_missing_or_failing_bookkeeping(
+    start_env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing(pid: int, image: str) -> None:
+        raise ImportError("cannot import name 'note_child'")
+
+    monkeypatch.setattr(acad, "_note_child", missing)
+    assert not acad.AcadSession.start(timeout=30).warnings
+
+    def failing(pid: int, image: str) -> None:
+        raise OSError("disk")
+
+    start_env.created.clear()  # a fresh start sees the original process table
+    monkeypatch.setattr(acad, "_note_child", failing)
+    session = acad.AcadSession.start(timeout=30)
+    assert any("could not record" in w for w in session.warnings)
+
+
+class FakeJob:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def Close(self) -> None:
+        self.closed = True
+
+
+def test_job_is_released_only_once_the_process_is_gone(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    session = make_session(app)
+    session._job = job = FakeJob()
+    session.quit()
+    assert job.closed
+
+    app2 = FakeApp()
+    patch_process(monkeypatch, app2, None)  # survives everything
+    session2 = make_session(app2)
+    session2._job = job2 = FakeJob()
+    with pytest.raises(CadError):
+        session2.quit(timeout=20)
+    assert not job2.closed  # closing it would kill the process; python exit does that
+
+
+def test_assign_job_is_best_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    job, reason = acad._assign_job(2**31 - 5)  # no such process: refused or unsupported
+    assert job is None and reason and "could not be tied" in reason
+
+
+def test_attribution_failure_names_the_hidden_instance(start_env: SimpleNamespace) -> None:
+    start_env.after = {1, 2, 3}
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    err = info.value
+    assert "still running" in err.message and "2, 3" in err.message
+    assert "Task Manager" in (err.hint or "") and err.candidate_pids == [2, 3]  # type: ignore[attr-defined]
+    assert err.exit_code == ExitCode.BUSY
+
+
+def test_attribution_with_no_new_process_says_nothing_was_started(
+    start_env: SimpleNamespace,
+) -> None:
+    start_env.after = {1}
+    with pytest.raises(CadError) as info:
+        acad.AcadSession.start(timeout=30)
+    assert "left alone" in info.value.message and "still running" not in info.value.message
+
+
+class Watched:
+    """Process table for watchdog tests: alive until killed; records every PID it is asked about."""
+
+    def __init__(self, app: FakeApp, foreign: int = 999) -> None:
+        self.app = app
+        self.unblock = threading.Event()
+        self.killed = False
+        self.calls: list[tuple[str, int]] = []
+        self.foreign = foreign
+
+    def alive(self, pid: int, image: str) -> bool:
+        return not self.killed
+
+    def close(self, pid: int) -> None:
+        self.calls.append(("close", pid))
+
+    def kill(self, pid: int) -> None:
+        self.calls.append(("kill", pid))
+        self.killed = True
+        self.unblock.set()  # the blocked COM call fails once its server dies
+
+
+def block_until_killed(watched: Watched) -> Any:
+    def hook() -> None:
+        assert watched.unblock.wait(10), "watchdog never fired"
+        raise FakeComError(-2147417848)  # RPC_E_DISCONNECTED
+
+    return hook
+
+
+def test_watchdog_terminates_only_own_pid_in_escalation_order(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    watched = Watched(app)
+    app.open_hook = block_until_killed(watched)
+    monkeypatch.setattr(acad, "_pid_alive", watched.alive)
+    monkeypatch.setattr(acad, "_close_pid", watched.close)
+    monkeypatch.setattr(acad, "_kill_pid", watched.kill)
+    session = make_session(app, op_timeout=0.05)
+    with pytest.raises(CadError) as info:
+        session.open(drawing)
+    assert info.value.code == "TIMEOUT" and info.value.exit_code == ExitCode.TIMEOUT
+    assert watched.calls == [("close", 100), ("kill", 100)]  # own pid only, graceful first
+    assert all(pid != watched.foreign for _, pid in watched.calls)
+    assert session._dead and any("terminating pid 100" in w for w in session.warnings)
+    with pytest.raises(CadError) as again:  # a dead session fails fast, never touching COM
+        session.open(drawing)
+    assert again.value.code == "TIMEOUT"
+    session.quit()  # no Quit call on a dead process, no hang
+    assert "quit" not in app.events and session.documents == []
+
+
+def test_watchdog_stays_quiet_when_the_call_finishes_in_time(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    watched = Watched(app)
+    monkeypatch.setattr(acad, "_pid_alive", watched.alive)
+    monkeypatch.setattr(acad, "_close_pid", watched.close)
+    monkeypatch.setattr(acad, "_kill_pid", watched.kill)
+    session = make_session(app, op_timeout=5.0)
+    session.open(drawing)
+    assert watched.calls == [] and not session._dead
+
+
+def test_watchdog_never_terminates_a_process_it_did_not_start(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app = FakeApp()
+    watched = Watched(app)
+    app.open_hook = lambda: time.sleep(0.2)  # slower than op_timeout
+    monkeypatch.setattr(acad, "_pid_alive", watched.alive)
+    monkeypatch.setattr(acad, "_close_pid", watched.close)
+    monkeypatch.setattr(acad, "_kill_pid", watched.kill)
+    session = make_session(app, owned=False, op_timeout=0.05)
+    session.open(drawing)
+    assert watched.calls == [] and not session._dead
+
+
+def test_watchdog_does_not_kill_a_process_that_already_exited(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    watched = Watched(app)
+    watched.killed = True  # gone before the watchdog acts (and its PID may be reused)
+    monkeypatch.setattr(acad, "_pid_alive", watched.alive)
+    monkeypatch.setattr(acad, "_close_pid", watched.close)
+    monkeypatch.setattr(acad, "_kill_pid", watched.kill)
+    session = make_session(app)
+    assert session._terminate_own() is True and watched.calls == []
+
+
+def test_dwl_that_appeared_after_open_is_not_ours(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    session = make_session(app)
+    session.open(drawing)
+    elsewhere = drawing.with_suffix(".dwl")  # the user opens the original in another session
+    elsewhere.write_text("user")
+    session.quit()
+    assert elsewhere.exists()
+
+
+def test_dwl_with_an_older_mtime_than_the_open_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app.create_on_open = [".dwl2"]
+    session = make_session(app)
+    session.open(drawing)
+    lock = drawing.with_suffix(".dwl2")
+    assert lock in session._dwl
+    old = time.time() - 3600
+    os.utime(lock, (old, old))  # replaced by something older than our open: not the file we saw
+    session.quit()
+    assert lock.exists()
+
+
+def test_dwl_created_by_open_is_removed(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    app.create_on_open = [".dwl", ".dwl2"]
+    session = make_session(app)
+    session.open(drawing)
+    session.quit()
+    assert not drawing.with_suffix(".dwl").exists() and not drawing.with_suffix(".dwl2").exists()
+
+
+def test_doc_export_dxf_leaves_the_document_open(clock: Clock, tmp_path: Path) -> None:
+    dxf = tmp_path / "v.dxf"
+    _dxf_with_viewports(dxf, [1, 2])
+    session, raw, drawing = export_session(tmp_path, dxf.read_text("utf-8"))
+    doc = session.open(drawing)
+    dst = tmp_path / "direct.dxf"
+    assert doc.export_dxf(dst) == []
+    assert dst.exists() and not raw.closed and session.documents == [doc]
+    assert raw.ctab_history == ["Sheet-A", "Sheet-B", "Sheet-A"]
+    with pytest.raises(CadError) as err:  # never overwrites
+        doc.export_dxf(dst)
+    assert err.value.code == "DEST_EXISTS"
+    doc.close()
+
+
+def test_doc_plot_leaves_the_document_open(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    def plot(path: str) -> bool:
+        Path(path).write_bytes(b"%PDF-1.7 fake")
+        return True
+
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: (1, (420.0, 297.0)))
+    session, _app, raw, drawing = plot_session(tmp_path, plot)
+    doc = session.open(drawing)
+    warnings = doc.plot_layout_pdf("Sheet-A", tmp_path / "direct.pdf")
+    assert acad.VIEWER_WARNING in warnings and not raw.closed
+    assert session.documents == [doc]
+    with pytest.raises(CadError) as err:
+        doc.plot_layout_pdf("Model", tmp_path / "m.pdf")
+    assert err.value.exit_code == ExitCode.PRECONDITION_FAILED
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        lambda: acad._parse_scale("x"),
+        lambda: acad._parse_scale("0:5"),
+        lambda: make_session()._apply_page_options(FakeLayout("L"), {"rotation": 45}),
+        lambda: make_session()._apply_page_options(FakeLayout("L"), {"plot_area": "moon"}),
+        lambda: acad.AcadSession.save_dwg(make_session(), None, Path("x"), "1999"),  # type: ignore[arg-type]
+    ],
+)
+def test_bad_arguments_carry_the_bad_args_exit_code(call: Any) -> None:
+    with pytest.raises(CadError) as err:
+        call()
+    assert err.value.code == "BAD_ARGS" and err.value.exit_code == ExitCode.BAD_ARGS
+
+
+def test_doc_close_with_save_is_a_bad_arg(clock: Clock, tmp_path: Path) -> None:
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    doc = make_session().open(drawing)
+    with pytest.raises(CadError) as err:
+        doc.close(save=True)
+    assert err.value.exit_code == ExitCode.BAD_ARGS
+
+
+# --- COM: orphan protection and the watchdog on a real instance ----------------------------------
+
+_CHILD = """
+import json, sys, time
+sys.path.insert(0, {scripts!r})
+from cadlib import acad
+s = acad.AcadSession.start()
+print(json.dumps({{"pid": s.pid, "warnings": s.warnings}}), flush=True)
+time.sleep(600)
+"""
+
+
+def _wait_gone(pid: int, image: str, seconds: float) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if pid not in acad._list_pids(image):
+            return True
+        time.sleep(1)
+    return pid not in acad._list_pids(image)
+
+
+@pytest.mark.com
+@pytest.mark.skipif(not _cad_installed(), reason="no AutoCAD COM server registered")
+def test_com_cad_dies_with_its_python_process(tmp_path: Path) -> None:
+    """Hard-kill the Python process that owns a session: the CAD process must vanish."""
+    image = "acad.exe"
+    if acad._list_pids(image):
+        pytest.skip("another acad.exe is running; refusing to touch it")
+    script = tmp_path / "child.py"
+    script.write_text(_CHILD.format(scripts=str(SKILL / "scripts")), encoding="utf-8")
+    child = subprocess.Popen(
+        [sys.executable, str(script)], stdout=subprocess.PIPE, text=True, env=os.environ.copy()
+    )
+    cad_pid = None
+    try:
+        assert child.stdout is not None
+        line = child.stdout.readline()
+        assert line, "child did not start a session"
+        info = json.loads(line)
+        cad_pid = info["pid"]
+        assert cad_pid in acad._list_pids(image)
+        assert not any("could not be tied" in w for w in info["warnings"]), info["warnings"]
+        subprocess.run(["taskkill", "/PID", str(child.pid), "/F"], capture_output=True, check=False)
+        child.wait(timeout=30)
+        assert _wait_gone(cad_pid, image, 30), f"CAD pid {cad_pid} outlived its Python process"
+    finally:
+        if child.poll() is None:
+            subprocess.run(
+                ["taskkill", "/PID", str(child.pid), "/F"], capture_output=True, check=False
+            )
+        if cad_pid is not None and cad_pid in acad._list_pids(image):
+            acad._kill_pid(cad_pid)  # our own pid only
+
+
+@pytest.mark.com
+@pytest.mark.skipif(not _cad_installed(), reason="no AutoCAD COM server registered")
+def test_com_watchdog_terminates_own_instance_when_a_call_blocks(
+    tmp_path: Path, fixtures_dir: Path
+) -> None:
+    """A 1 ms deadline on Documents.Open makes the watchdog fire on a real call."""
+    image = "acad.exe"
+    if acad._list_pids(image):
+        pytest.skip("another acad.exe is running; refusing to touch it")
+    session = acad.AcadSession.start(timeout=120)
+    pid = session.pid
+    try:
+        session.op_timeout = 0.001
+        with pytest.raises(CadError) as err:
+            session.open(fixtures_dir / "sheet_set.dxf")
+        assert err.value.code == "TIMEOUT" and err.value.exit_code == ExitCode.TIMEOUT
+        assert pid not in acad._list_pids(image)
+    finally:
+        session.quit()
+    assert not acad._list_pids(image)

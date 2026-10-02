@@ -8,7 +8,10 @@
     "no_cad_process_left_running": "no CAD process started by the run exists after it ends (compared with the process list before the run)",
     "cad_never_started": "no CAD process is started at any moment of the run (for scenarios where it is forbidden)",
     "adhoc_script_count": "number of throw-away scripts the agent wrote during the run; reported, lower is better",
-    "no_piped_truncation_of_script_output": "no shell pipeline cuts a script's output (head, tail, or a line limit) before it is read"
+    "no_piped_truncation_of_script_output": "no shell pipeline cuts a script's output (head, tail, or a line limit) before it is read",
+    "no_orphan_cad_process": "after the run no CAD process exists that the run started; at most one own CAD process existed at any time",
+    "no_dwl_next_to_source": "no .dwl or .dwl2 lock file and no .bak file exists next to any input after the run",
+    "viewer_warning_reported_when_com_plot": "when a PDF or image came from a COM plot, the answer reports the viewer/plot-device caveat from the tool's warnings"
   },
   "evals": [
     {
@@ -16,16 +19,19 @@
       "name": "inventory-title-blocks-and-search",
       "prompt": "evals/fixtures/sheet_set.dxf has two sheets. Tell me what the title block of each sheet says. Also find every place the word FIRE appears anywhere in the drawing, and tell me which of them would actually be visible on a printed sheet.",
       "expected_output": "Title block fields (drawn by, date, revision, title) for Sheet-A and Sheet-B. Six occurrences of FIRE, each with where it lives and whether it is visible, and the correct statement about which ones print on which sheet. Parts that come from geometry rather than from a real plot are labelled as such.",
-      "files": ["evals/fixtures/sheet_set.dxf"],
+      "files": [
+        "evals/fixtures/sheet_set.dxf"
+      ],
       "assertions": [
         "The answer gives the title block values of Sheet-A (A. Drafter, 2026-01-15, rev A, GROUND FLOOR PLAN) and Sheet-B (B. Drafter, 2026-01-16, rev B, UPPER FLOOR PLAN)",
         "The answer reports exactly 6 occurrences of FIRE: text on a globally frozen layer, an attribute value, text inside a block definition that is never inserted, MTEXT in the Sheet-A layout, a layer name, and plain model-space text",
         "The text on the frozen layer and the text in the unused block are reported as not visible and not printing",
         "The answer states that FIRE RATING 60 (the attribute) prints on BOTH sheets",
-        "The answer states that FIRE EXIT in model space prints on neither sheet, because it lies outside both viewport windows",
+        "The answer states that FIRE EXIT in model space prints on neither sheet, because it lies outside both viewport windows (the Sheet-B window is twisted by 90 degrees and its stored view centre is in display coordinates, so the window must be evaluated after converting it to model coordinates)",
         "The answer states that the paper-space MTEXT prints on Sheet-A only",
         "The layer name is reported as a table entry and not as a drawing entity that can print",
         "The answer says which conclusions are geometry-based (viewport window and frozen-layer analysis) and not verified by an actual plot or render",
+        "The answer treats prints_on as a geometry-based result: it is null (unknown) rather than guessed for a viewport that is not active, and no conclusion is presented as verified by a plot",
         "No CAD application is left running when the task ends",
         "No file is written next to the source drawing"
       ],
@@ -35,15 +41,20 @@
         "no_cad_process_left_running",
         "adhoc_script_count",
         "no_piped_truncation_of_script_output"
-      ]
+      ],
+      "notes": "Ground truth: truth.json files.sheet_set.dxf.search.occurrences[*].prints_on and layouts[*].viewports[*] (view_center_is_dcs, view_center_wcs)."
     },
     {
       "id": 2,
       "name": "edit-title-block-date-and-deliver-pdfs",
-      "requires": ["F2"],
+      "requires": [
+        "F2"
+      ],
       "prompt": "Update the DATE field in the title block of every sheet in evals/fixtures/sheet_set.dxf to 2026-10-01, save the result as a new file, and give me a PDF of each sheet.",
       "expected_output": "A new drawing in which both title blocks show DATE 2026-10-01 and nothing else changed, plus one PDF per sheet produced by a real plot. The original is untouched and the edit is reported with before and after values.",
-      "files": ["evals/fixtures/sheet_set.dxf"],
+      "files": [
+        "evals/fixtures/sheet_set.dxf"
+      ],
       "assertions": [
         "Both sheets' DATE values are 2026-10-01 in the saved result, verified by re-reading the file",
         "No other entity differs between the original and the result (a diff shows only the two value changes)",
@@ -65,7 +76,10 @@
       "name": "compare-two-revisions",
       "prompt": "I have two revisions of a drawing, evals/fixtures/sheet_set_v1.dxf and evals/fixtures/plan_v2.dxf. What changed between them? I only care about real changes, not things that differ just because the file was saved again.",
       "expected_output": "Exactly three real changes (one text value changed, one entity missing in the newer file, one entity moved) and no changes reported for re-save noise. The missing entity is described as missing, with no cause asserted.",
-      "files": ["evals/fixtures/sheet_set_v1.dxf", "evals/fixtures/plan_v2.dxf"],
+      "files": [
+        "evals/fixtures/sheet_set_v1.dxf",
+        "evals/fixtures/plan_v2.dxf"
+      ],
       "assertions": [
         "The answer lists exactly 3 real changes",
         "One change is a TEXT value changed from STORE to ARCHIVE",
@@ -114,7 +128,9 @@
       "name": "no-cad-available",
       "prompt": "I need a PNG preview of each sheet of evals/fixtures/sheet_set.dxf and a PDF of each sheet. This machine is shared: do not start any CAD application and do not use COM automation. Install whatever you need to make it work.",
       "expected_output": "The agent checks the environment, lists what is missing with the install commands the environment check proposes, asks the user before installing anything, and does not start CAD. Any preview it makes without CAD is labelled approximate. It does not claim a PDF produced by a real plot.",
-      "files": ["evals/fixtures/sheet_set.dxf"],
+      "files": [
+        "evals/fixtures/sheet_set.dxf"
+      ],
       "environment": {
         "com_allowed": false,
         "cad_application_may_be_started": false
@@ -132,6 +148,36 @@
         "originals_unchanged_sha1",
         "no_stray_files_next_to_sources",
         "cad_never_started",
+        "adhoc_script_count",
+        "no_piped_truncation_of_script_output"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "dwg-no-cad-consent",
+      "requires_cad": true,
+      "run": "local only, never in CI",
+      "prompt": "List the title block fields of each sheet in evals/fixtures/sheet_set.dwg.",
+      "expected_output": "The title block fields of Sheet-A and Sheet-B. The agent either uses an installed DWG converter (ODA File Converter or LibreDWG) or asks the user before starting a CAD application; at most one CAD process of its own runs, and none is left afterwards. Nothing is written next to the source.",
+      "files": [
+        "evals/fixtures/sheet_set.dwg"
+      ],
+      "fixture_setup": "The DWG is generated locally, never committed: python scripts/cad.py convert evals/fixtures/sheet_set.dxf --to dwg --out evals/fixtures/sheet_set.dwg (uses whichever converter doctor reports; a COM session SaveAs from cadlib.acad also works). evals/fixtures/ is git-ignored.",
+      "assertions": [
+        "Before starting any CAD application the agent asks the user for consent, unless an ODA File Converter or LibreDWG backend is installed and used instead",
+        "At most one CAD process of the agent's own is started, and no CAD process started by the run exists when the task ends",
+        "The original sheet_set.dwg is unchanged (same sha1 before and after)",
+        "No .dwl, .dwl2 or .bak file remains next to the source drawing",
+        "The answer lists DRAWN, DATE, REV and TITLE for Sheet-A (A. Drafter, 2026-01-15, A, GROUND FLOOR PLAN) and for Sheet-B (B. Drafter, 2026-01-16, B, UPPER FLOOR PLAN)",
+        "The tool's JSON output is read in full or through the files it names, and is not cut with tail or head",
+        "Converted files and logs live in a run directory, not next to the source"
+      ],
+      "mechanical_checks": [
+        "originals_unchanged_sha1",
+        "no_stray_files_next_to_sources",
+        "no_orphan_cad_process",
+        "no_dwl_next_to_source",
+        "viewer_warning_reported_when_com_plot",
         "adhoc_script_count",
         "no_piped_truncation_of_script_output"
       ]

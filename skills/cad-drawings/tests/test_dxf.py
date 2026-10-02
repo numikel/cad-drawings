@@ -10,6 +10,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import ezdxf
@@ -18,8 +19,8 @@ import pytest
 SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / "scripts"))
 
-from cadlib import dxf
-from cadlib.result import CadError, Result
+from cadlib import diffing, dxf
+from cadlib.result import CadError, ExitCode, Result
 
 NON_ASCII = "zażółć gęślą jaźń"
 
@@ -260,7 +261,7 @@ def test_prints_on_respects_twist_target_and_viewport_freeze(tmp_path: Path, run
     assert hit["prints_on"] is None and "top-view" in hit["prints_on_note"]
 
 
-def test_unreliable_viewport_status_is_warned_not_trusted(
+def test_unreliable_viewport_status_gives_unknown_never_a_guess(
     fx: Path, runs: Path, tmp_path: Path
 ) -> None:
     doc = ezdxf.readfile(fx / "sheet_set.dxf")
@@ -272,11 +273,26 @@ def test_unreliable_viewport_status_is_warned_not_trusted(
     doc.saveas(src)
     res = run_cmd("find", [str(src), "--pattern", "FIRE RATING"], runs)
     hit = read_jsonl(res, "hits")[0]
-    assert hit["prints_on"] == ["Sheet-A", "Sheet-B"]  # the old skill said Sheet-A only
-    assert "status 0" in hit["prints_on_note"]
-    assert any("not reliable" in w for w in res.warnings)
+    # the old skill said "Sheet-A only"; true and false would both be guesses
+    assert hit["prints_on"] is None
+    assert hit["prints_on_unknown"] == ["Sheet-A", "Sheet-B"]
+    assert "status 0" in hit["prints_on_note"] and "COM export" in hit["prints_on_note"]
+    assert any("cannot be trusted" in w for w in res.warnings)
     info = run_cmd("info", [str(src)], runs)
     assert info.summary["viewports_status_unreliable"] == 2
+
+
+def test_one_trustworthy_layout_is_confirmed_next_to_an_unknown_one(
+    fx: Path, runs: Path, tmp_path: Path
+) -> None:
+    doc = ezdxf.readfile(fx / "sheet_set.dxf")
+    for vp in doc.layouts.get("Sheet-B").query("VIEWPORT"):
+        if vp.dxf.id > 1:
+            vp.dxf.status = -1
+    src = tmp_path / "mixed.dxf"
+    doc.saveas(src)
+    hit = read_jsonl(run_cmd("find", [str(src), "--pattern", "FIRE RATING"], runs), "hits")[0]
+    assert hit["prints_on"] == ["Sheet-A"] and hit["prints_on_unknown"] == ["Sheet-B"]
 
 
 # --------------------------------------------------------------------------------------
@@ -315,7 +331,7 @@ def test_info_xref_missing_and_block_stats(fx: Path, runs: Path, truth: dict[str
     claim = truth["files"]["xref_missing.dxf"]["xrefs"][0]
     assert [x["block"] for x in info["xrefs"]] == [claim["block_name"]]
     assert info["xrefs"][0]["resolved_on_disk"] is False and not info["xrefs"][0]["overlay"]
-    assert res.summary["xrefs"] == {"count": 1, "unresolved": 1, "bound": 0}
+    assert res.summary["xrefs"] == {"count": 1, "unresolved": 1, "unchecked": 0, "bound": 0}
     assert any("not found on disk" in w for w in res.warnings)
     blocks = read_json(run_cmd("info", [str(fx / "blocks_attribs.dxf")], runs), "info")["blocks"]
     tag = next(b for b in blocks if b["name"] == "ROOM_TAG")
@@ -339,14 +355,15 @@ def test_info_lock_files_and_conventions(fx: Path, runs: Path, tmp_path: Path) -
 
 
 def test_missing_and_unsupported_input(runs: Path, tmp_path: Path) -> None:
-    with pytest.raises(CadError) as err:
-        run_cmd("info", [str(tmp_path / "nope.dxf")], runs)
-    assert err.value.code == "FILE_NOT_FOUND"
+    for command in ("info", "dump", "fingerprint"):
+        with pytest.raises(CadError) as err:
+            run_cmd(command, [str(tmp_path / "nope.dxf")], runs)
+        assert err.value.code == "FILE_NOT_FOUND" and err.value.exit_code == ExitCode.BAD_ARGS
     other = tmp_path / "x.txt"
     other.write_text("hi")
     with pytest.raises(CadError) as err2:
         run_cmd("info", [str(other)], runs)
-    assert err2.value.code == "BAD_ARGS"
+    assert err2.value.code == "UNSUPPORTED" and err2.value.exit_code == ExitCode.BAD_ARGS
 
 
 def test_damaged_dxf_is_recovered_with_a_warning(fx: Path, runs: Path, tmp_path: Path) -> None:
@@ -528,7 +545,7 @@ def test_diff_accepts_fingerprint_files_and_reports_structure(
 def test_diff_full_flag_lifts_the_cap(
     fx: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(dxf, "DIFF_JSON_CAP", 1)
+    monkeypatch.setattr(diffing, "DIFF_JSON_CAP", 1)
     capped = run_cmd("diff", [str(fx / "sheet_set_v1.dxf"), str(fx / "plan_v2.dxf")], runs)
     assert len(read_json(capped, "diff")["changes"]) == 1 and capped.warnings
     full = run_cmd("diff", [str(fx / "sheet_set_v1.dxf"), str(fx / "plan_v2.dxf"), "--full"], runs)
@@ -540,39 +557,113 @@ def test_diff_full_flag_lifts_the_cap(
 # --------------------------------------------------------------------------------------
 
 
-class FakeConverter:
-    name = "fake"
-    approximate = False
+class FakeEnsure:
+    """Stands in for ``convert.ensure_dxf``: records the consent flags, returns a fixed DXF."""
+
+    def __init__(
+        self, dxf_path: Path, warnings: list[str] | None = None, approximate: bool = False
+    ):
+        self.dxf_path, self.warnings, self.approximate = dxf_path, warnings or [], approximate
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, src: Path, ctx: Any, **kwargs: Any) -> Any:
+        self.calls.append({"src": src, **kwargs})
+        backend = "libredwg" if self.approximate else "oda"
+        return SimpleNamespace(
+            path=self.dxf_path,
+            backend=backend,
+            approximate=self.approximate,
+            cached=False,
+            warnings=list(self.warnings),
+        )
 
 
-def test_dwg_is_converted_cached_and_temp_deleted(
-    fx: Path, runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.fixture
+def dwg(tmp_path: Path) -> Path:
+    path = tmp_path / "drawing.dwg"
+    path.write_bytes(b"AC1032 not really a dwg")
+    return path
+
+
+def test_every_command_reads_dwg_through_the_one_pipeline(
+    fx: Path, runs: Path, dwg: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from cadlib import convert as convert_module
 
-    calls: list[Path] = []
+    fake = FakeEnsure(fx / "sheet_set.dxf", ["fake converter warning"])
+    monkeypatch.setattr(convert_module, "ensure_dxf", fake)
+    runs_of = {
+        "info": run_cmd("info", [str(dwg)], runs),
+        "find": run_cmd("find", [str(dwg), "--pattern", "FIRE"], runs),
+        "dump": run_cmd("dump", [str(dwg), "--type", "TEXT"], runs),
+        "fingerprint": run_cmd("fingerprint", [str(dwg)], runs),
+        "diff": run_cmd("diff", [str(dwg), str(fx / "sheet_set.dxf")], runs),
+    }
+    assert len(fake.calls) == 5 and all(c["src"] == dwg.resolve() for c in fake.calls)
+    # reading a DWG never silently starts CAD: no consent unless it is given
+    assert all(c["allow_com"] is False and c["prefer"] is None for c in fake.calls)
+    for command, res in runs_of.items():
+        assert any("fake converter warning" in w for w in res.warnings), command
+    assert runs_of["diff"].summary["identical"] is True
 
-    def fake_convert(src: Path, dst: Path, fmt: str, *, prefer: str | None = None, ctx: Any) -> Any:
-        calls.append(src)
-        shutil.copy(fx / "sheet_set.dxf", dst)
-        return FakeConverter(), ["fake converter warning"]
 
-    monkeypatch.setattr(convert_module, "convert", fake_convert)
-    dwg = tmp_path / "drawing.dwg"
-    dwg.write_bytes(b"AC1032 not really a dwg")
-    # fingerprint: no caching, temp DXF removed after use
-    res = run_cmd("fingerprint", [str(dwg)], runs)
-    assert calls == [dwg]
-    assert not list(runs.rglob("converted-*.dxf")), "temporary DXF must be deleted"
-    assert res.summary["entities"] > 10
-    # info: converted once into the cache, second call reuses it
-    run_cmd("info", [str(dwg)], runs)
-    run_cmd("info", [str(dwg)], runs)
-    assert len(calls) == 2
-    assert len(list((runs / "cache").rglob("*.dxf"))) == 1
-    # a cache hit is also used by fingerprint
-    run_cmd("fingerprint", [str(dwg)], runs)
-    assert len(calls) == 2
+def test_consent_and_backend_flags_reach_the_converter(
+    fx: Path, runs: Path, dwg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadlib import convert as convert_module
+
+    fake = FakeEnsure(fx / "sheet_set.dxf")
+    monkeypatch.setattr(convert_module, "ensure_dxf", fake)
+    run_cmd("info", [str(dwg), "--allow-com"], runs)
+    run_cmd("find", [str(dwg), "--pattern", "x", "--backend", "oda"], runs)
+    run_cmd("dump", [str(dwg), "--backend", "com"], runs)
+    assert [(c["allow_com"], c["prefer"]) for c in fake.calls] == [
+        (True, None),
+        (False, "oda"),
+        (False, "com"),
+    ]
+    parser = argparse.ArgumentParser()
+    dxf.COMMANDS["info"].add_arguments(parser)
+    assert parser.parse_args(["x.dxf"]).timeout == 100.0
+
+
+def test_approximate_conversion_is_flagged_on_every_result(
+    fx: Path, runs: Path, dwg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadlib import convert as convert_module
+
+    fake = FakeEnsure(fx / "sheet_set.dxf", approximate=True)
+    monkeypatch.setattr(convert_module, "ensure_dxf", fake)
+    for res in (
+        run_cmd("info", [str(dwg)], runs),
+        run_cmd("find", [str(dwg), "--pattern", "FIRE"], runs),
+        run_cmd("dump", [str(dwg)], runs),
+        run_cmd("fingerprint", [str(dwg)], runs),
+        run_cmd("diff", [str(dwg), str(fx / "sheet_set.dxf")], runs),
+    ):
+        assert res.approximate is True
+        assert any("approximate" in w.lower() for w in res.warnings)
+
+
+def test_no_backend_is_surfaced_unchanged(
+    runs: Path, dwg: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadlib import convert as convert_module
+
+    def refuse(src: Path, ctx: Any, **kwargs: Any) -> Any:
+        raise CadError("NO_BACKEND", "no converter", hint="install ODA")
+
+    monkeypatch.setattr(convert_module, "ensure_dxf", refuse)
+    for command, argv in (
+        ("info", [str(dwg)]),
+        ("find", [str(dwg), "--pattern", "x"]),
+        ("dump", [str(dwg)]),
+        ("fingerprint", [str(dwg)]),
+        ("diff", [str(dwg), str(dwg)]),
+    ):
+        with pytest.raises(CadError) as err:
+            run_cmd(command, argv, runs)
+        assert err.value.code == "NO_BACKEND" and err.value.exit_code == ExitCode.MISSING_DEPENDENCY
 
 
 # --------------------------------------------------------------------------------------

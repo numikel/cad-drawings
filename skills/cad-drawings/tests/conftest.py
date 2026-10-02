@@ -59,3 +59,26 @@ def truth(fixtures_dir: Path) -> dict[str, Any]:
 def changes(fixtures_dir: Path) -> dict[str, Any]:
     """Parsed changes.json: ground truth of the sheet_set_v1 -> plan_v2 comparison."""
     return json.loads((fixtures_dir / "changes.json").read_text(encoding="utf-8"))  # type: ignore[no-any-return]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_cad_in_unit_tests(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Safety net: only tests marked ``com`` may start or attach to a real CAD application.
+
+    Every real start goes through ``acad._create_app`` / ``acad._get_active``; unit tests that
+    need a fake patch those names themselves (a later monkeypatch in the test wins).
+    """
+    if request.node.get_closest_marker("com"):
+        return
+    try:
+        from cadlib import acad
+    except ImportError:  # scripts dir not on sys.path for this module
+        return
+
+    def refuse(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("unit tests must not start or attach to a real CAD application")
+
+    monkeypatch.setattr(acad, "_create_app", refuse)
+    monkeypatch.setattr(acad, "_get_active", refuse)

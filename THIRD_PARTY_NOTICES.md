@@ -8,19 +8,18 @@ This project uses the following open-source and third-party components.
 |---|---|---|
 | [ezdxf](https://github.com/mozman/ezdxf) | MIT | Read and analyze DXF files; approximate rendering |
 | [pypdfium2](https://github.com/chinapandaman/pypdfium2) | Apache-2.0 / BSD-3-Clause | Convert PDF to PNG (PDFium + support code) |
-| [Pillow](https://python-pillow.org/) | HPND-like (permissive) | Image processing (transitive via ezdxf) |
-| [numpy](https://numpy.org/) | BSD-3 | Numeric computation (transitive via ezdxf) |
-| [fonttools](https://github.com/fonttools/fonttools) | MIT | Font utilities (transitive via ezdxf) |
-| [pyparsing](https://github.com/pyparsing/pyparsing) | MIT | Parsing (transitive via ezdxf) |
+| [Pillow](https://python-pillow.org/) | HPND-like (permissive) | Image resizing and cropping (direct dependency) |
+| [numpy](https://numpy.org/) | BSD-3 | Numeric computation (transitive via ezdxf and matplotlib) |
+| [fonttools](https://github.com/fonttools/fonttools) | MIT | Font utilities (transitive via ezdxf and matplotlib) |
+| [pyparsing](https://github.com/pyparsing/pyparsing) | MIT | Parsing (transitive via ezdxf and matplotlib) |
 
 ## Optional dependencies
 
 | Component | License | Use | Install if… |
 |---|---|---|---|
-| [pywin32](https://github.com/pywin32) | PSF / BSD | COM automation (Windows only) | You use Windows and want to edit DWG natively or plot through AutoCAD |
-| [matplotlib](https://matplotlib.org/) | PSF-based (permissive) | Optional rasterization backend for ezdxf | You prefer matplotlib over PIL for rendering |
-| [shapely](https://shapely.readthedocs.io/) | BSD-3 | Optional geometric calculations | You use `measure` command |
-| [PyMuPDF (fitz)](https://pymupdf.io/) | **AGPL-3.0 OR commercial** | Faster PDF → PNG conversion (than pypdfium2) | You need speed and accept AGPL terms, OR have a commercial license; **not recommended for distribution** |
+| [pywin32](https://github.com/pywin32) | PSF / BSD | COM automation of the user's own CAD instance (Windows only) | Needed only for COM features; the user must hold a CAD licence |
+| [matplotlib](https://matplotlib.org/) | PSF-based (permissive) | Required rasterization backend of the approximate (ezdxf) render | Always |
+| [PyMuPDF (fitz)](https://pymupdf.io/) | **AGPL-3.0 OR commercial** | Faster PDF → PNG conversion (than pypdfium2), only with `render --raster pymupdf` | You need speed and accept AGPL terms, OR have a commercial license; **not recommended for distribution** |
 
 ## External programs (not bundled)
 
@@ -30,7 +29,6 @@ These are third-party tools that must be installed separately on the operating s
 |---|---|---|---|
 | [ODA File Converter](https://www.opendesign.com/guestfiles/ODAFileConverter) | Proprietary freeware (no public redistribution rights) | Convert DWG ↔ DXF (highest fidelity) | User downloads directly; script detects and uses it |
 | [LibreDWG](https://www.gnu.org/software/libredwg/) | GPL-3.0+ | Convert DWG ↔ DXF (fallback, approximate) | `apt-get install libredwg-tools` (Linux) / `brew install libredwg` (macOS) / Chocolatey (Windows) |
-| [Poppler](https://poppler.freedesktop.org/) | GPL | PDF → PNG conversion (last resort, if neither pypdfium2 nor PyMuPDF available) | `apt-get install poppler-utils` (Linux) / `brew install poppler` (macOS); usually present via system packages |
 | [Xvfb](https://www.x.org/releases/X11R7.6/doc/man/man1/Xvfb.1.html) | MIT | Virtual X display for ODA File Converter on headless Linux | `apt-get install xvfb` (Linux only) |
 
 ## AutoCAD and CAD hosts (user's license)
@@ -40,7 +38,7 @@ These are third-party tools that must be installed separately on the operating s
 ## License compliance notes
 
 - **Permissive stack (MIT + BSD)**: The required dependencies are fully permissive. This project can be freely used, modified and distributed.
-- **PyMuPDF (AGPL)**: Included only when installed by the user and imported on demand. If present, a warning is shown. For distribution, either exclude it or accept AGPL terms.
+- **PyMuPDF (AGPL)**: Not bundled; imported only when the user installed it and asked for `render --raster pymupdf`. For distribution, either exclude it or accept AGPL terms.
 - **Poppler and LibreDWG (GPL)**: External tools, not bundled. Users install them separately if needed. The skill detects and uses them; their use does not trigger GPL on this project (tool invocation, not linking).
 - **ODA File Converter**: Proprietary freeware; the publisher prohibits redistribution. Users download directly from the publisher's website.
 

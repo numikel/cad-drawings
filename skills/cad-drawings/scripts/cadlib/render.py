@@ -32,21 +32,30 @@ from typing import TYPE_CHECKING, Any
 
 import ezdxf
 from ezdxf import recover
-from PIL import Image
 
 from .command import Command
-from .dxf import Deadline, layout_viewports, open_drawing, parse_floats
-from .result import CadError, ExitCode, Result
+from .drawing import _resolve_source, open_drawing
+from .result import CadError, Result
+from .util import (
+    Deadline,
+    atomic_write,
+    conversion_options,
+    parse_floats,
+    path_is_local,
+    safe_is_file,
+)
+from .viewports import layout_viewports
 
 if TYPE_CHECKING:
     from ezdxf.document import Drawing
+    from PIL import Image
 
     from .runs import RunContext
 
 DEFAULT_DPI = 150
 DEFAULT_MAX_PX = 2000
 DEFAULT_LINEWEIGHT_SCALING = 0.87
-MAX_MASTER_PIXELS = 120_000_000
+MAX_MASTER_PIXELS = 50_000_000
 MAX_CROP_SIDE_PX = 10_000
 MAX_TILES = 100
 MAX_LISTED_OUTPUTS = 12
@@ -60,9 +69,46 @@ _PAPER_UNIT_MM = {0: 25.4, 1: 1.0}  # plot_paper_units: inches, millimetres (2 =
 # --------------------------------------------------------------------------------------
 
 
+def _pil() -> Any:
+    """Pillow's ``Image`` module, imported when first needed (clean error when missing)."""
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise CadError(
+            "MISSING_DEPENDENCY",
+            "rendering needs the Python package Pillow, which is not installed",
+            hint="ask the user, then: pip install pillow",
+        ) from exc
+    return Image
+
+
 def png_name(stem: str, layout: str, suffix: str = "") -> str:
     """``<stem>__<layout>[<suffix>].png`` with characters that are illegal in file names replaced."""
     return f"{stem}__{_UNSAFE_NAME.sub('_', layout).strip() or 'layout'}{suffix}.png"
+
+
+def assign_slugs(layouts: list[str]) -> dict[str, str]:
+    """File-name slug per layout; names that collapse to the same slug get ``-2``, ``-3``...
+
+    ``A/B``, ``A:B`` and ``A_B`` all sanitise to ``A_B``: each still gets its own file.
+    Comparison is case-insensitive because Windows and macOS file systems are.
+    """
+    taken: set[str] = set()
+    out: dict[str, str] = {}
+    for name in layouts:
+        base = _UNSAFE_NAME.sub("_", name).strip() or "layout"
+        slug, n = base, 1
+        while slug.lower() in taken:
+            n += 1
+            slug = f"{base}-{n}"
+        taken.add(slug.lower())
+        out[name] = slug
+    return out
+
+
+def save_png(image: Image.Image, path: Path) -> None:
+    """Write a PNG through a temporary sibling and ``os.replace`` (never a half-written file)."""
+    atomic_write(path, lambda tmp: image.save(tmp, format="PNG"))
 
 
 def parse_tiles(text: str) -> tuple[int, int]:
@@ -71,14 +117,12 @@ def parse_tiles(text: str) -> tuple[int, int]:
         raise CadError(
             "BAD_ARGS",
             f"--tiles must look like 3x2 (columns x rows), got {text!r}",
-            exit_code=ExitCode.BAD_ARGS,
         )
     cols, rows = int(match.group(1)), int(match.group(2))
     if not (1 <= cols and 1 <= rows and cols * rows <= MAX_TILES):
         raise CadError(
             "BAD_ARGS",
             f"--tiles must be between 1x1 and {MAX_TILES} tiles in total",
-            exit_code=ExitCode.BAD_ARGS,
         )
     return cols, rows
 
@@ -90,7 +134,7 @@ def cap_longest_side(image: Image.Image, max_px: int) -> Image.Image:
         return image
     factor = max_px / longest
     size = (max(1, round(image.width * factor)), max(1, round(image.height * factor)))
-    return image.resize(size, Image.Resampling.LANCZOS)
+    return image.resize(size, _pil().Resampling.LANCZOS)
 
 
 def crop_to_pixels(
@@ -109,7 +153,6 @@ def crop_to_pixels(
         raise CadError(
             "BAD_ARGS",
             "--crop does not overlap the rendered area",
-            exit_code=ExitCode.BAD_ARGS,
             hint=f"the layout covers x {x1:g}..{x2:g}, y {y1:g}..{y2:g}",
         )
     return left, top, right, bottom
@@ -146,14 +189,13 @@ def pdf_to_image(pdf: Path, dpi: int, raster: str = "pdfium") -> Image.Image:
             raise CadError(
                 "MISSING_DEPENDENCY",
                 "--raster pymupdf requested but PyMuPDF is not installed (AGPL, optional)",
-                exit_code=ExitCode.MISSING_DEPENDENCY,
                 hint="use the default pypdfium2 raster or install PyMuPDF yourself",
             )
         import pymupdf  # type: ignore[import-not-found,unused-ignore]
 
         with contextlib.closing(pymupdf.open(str(pdf))) as doc:
             pix = doc[0].get_pixmap(dpi=dpi)
-            return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            return _pil().frombytes("RGB", (pix.width, pix.height), pix.samples)
     try:
         import pypdfium2 as pdfium
     except ImportError:
@@ -163,7 +205,6 @@ def pdf_to_image(pdf: Path, dpi: int, raster: str = "pdfium") -> Image.Image:
             raise CadError(
                 "MISSING_DEPENDENCY",
                 "no PDF rasteriser available (pypdfium2 is missing)",
-                exit_code=ExitCode.MISSING_DEPENDENCY,
                 hint="pip install pypdfium2",
             ) from exc
         return convert_from_path(str(pdf), dpi=dpi, first_page=1, last_page=1)[0].convert("RGB")
@@ -234,18 +275,17 @@ def embed_xrefs(doc: Drawing, source_dir: Path) -> list[str]:
 
     def locate(name: str) -> Path | None:
         raw = Path(name.replace("\\", "/"))
-        candidates = [raw]
+        candidates = [raw] if path_is_local(raw) else []
         for folder in search_dirs:
-            candidates += [folder / raw, folder / raw.name]
+            candidates += [folder / raw.name]
+            if path_is_local(raw):
+                candidates.append(folder / raw)
         for candidate in candidates:
-            try:
-                if candidate.is_file():
-                    parent = candidate.resolve().parent
-                    if parent not in search_dirs:
-                        search_dirs.append(parent)
-                    return candidate
-            except OSError:
-                continue
+            if safe_is_file(candidate):
+                parent = candidate.resolve().parent
+                if parent not in search_dirs:
+                    search_dirs.append(parent)
+                return candidate
         return None
 
     def load(name: str) -> Drawing:
@@ -266,6 +306,11 @@ def embed_xrefs(doc: Drawing, source_dir: Path) -> list[str]:
             done.add(blk.name.lower())
             stored = str(blk.block.dxf.get("xref_path", ""))
             blk.block.dxf.xref_path = stored.replace("\\", "/")
+            if not path_is_local(stored):
+                warnings.append(
+                    f"xref {blk.name!r} not checked: network or non-local path {stored}"
+                )
+                continue
             if stored.lower().endswith(".dwg"):
                 warnings.append(
                     f"xref {blk.name!r} is a DWG ({stored}); convert it to DXF to embed"
@@ -312,7 +357,6 @@ def _render_box(
             raise CadError(
                 "EMPTY_LAYOUT",
                 "model space is empty, nothing to render",
-                exit_code=ExitCode.PRECONDITION_FAILED,
             )
         return (box.extmin.x, box.extmin.y, box.extmax.x, box.extmax.y), None, warnings
     units = int(layout.dxf.get("plot_paper_units", 1))
@@ -331,7 +375,6 @@ def _render_box(
         raise CadError(
             "NO_PAPER_SIZE",
             f"layout {layout.name!r} has no paper size",
-            exit_code=ExitCode.PRECONDITION_FAILED,
         )
     return (lo.x, lo.y, hi.x, hi.y), factor, warnings
 
@@ -356,14 +399,22 @@ def _ezdxf_options(support_dirs: list[str]) -> Iterator[None]:
 
 def render_layout_ezdxf(doc: Drawing, layout_name: str, opts: EzdxfOptions) -> Rendered:
     """Draw one layout of ``doc`` (already prepared: xrefs embedded) into a PIL image."""
-    import matplotlib
+    try:
+        import matplotlib
 
-    matplotlib.use("Agg", force=True)
-    from ezdxf.addons.drawing import Frontend, RenderContext
-    from ezdxf.addons.drawing import config as dconfig
-    from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    from matplotlib.backends.backend_agg import FigureCanvasAgg
-    from matplotlib.figure import Figure
+        matplotlib.use("Agg", force=True)
+        from ezdxf.addons.drawing import Frontend, RenderContext
+        from ezdxf.addons.drawing import config as dconfig
+        from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        from matplotlib.figure import Figure
+    except ImportError as exc:
+        raise CadError(
+            "MISSING_DEPENDENCY",
+            f"the ezdxf render needs the Python package matplotlib ({exc})",
+            hint="ask the user, then: pip install matplotlib",
+        ) from exc
+    image_module = _pil()
 
     layout = doc.layouts.get(layout_name)
     warnings = [] if layout.name.lower() == "model" else normalise_viewports(layout)
@@ -414,9 +465,14 @@ def render_layout_ezdxf(doc: Drawing, layout_name: str, opts: EzdxfOptions) -> R
     axes.set_ylim(box[1], box[3])
     axes.set_aspect("auto")
     canvas.draw()
-    pixel_size = canvas.get_width_height()
-    image = Image.frombuffer("RGBA", pixel_size, bytes(canvas.buffer_rgba()), "raw", "RGBA", 0, 1)
-    return Rendered(image.convert("RGB"), box, dpi, warnings)
+    # frombuffer shares the canvas memory; convert() makes the only copy, then the figure goes
+    shared = image_module.frombuffer(
+        "RGBA", canvas.get_width_height(), canvas.buffer_rgba(), "raw", "RGBA", 0, 1
+    )
+    master = shared.convert("RGB")
+    shared.close()
+    figure.clear()
+    return Rendered(master, box, dpi, warnings)
 
 
 # --------------------------------------------------------------------------------------
@@ -435,7 +491,7 @@ def _com_candidate() -> bool:
     return bool(getattr(acad, "PROGIDS", None))
 
 
-def _com_session() -> Any:
+def _com_session(ctx: RunContext | None = None) -> Any:
     """Start an own CAD instance (context manager). Isolated so tests can replace it."""
     try:
         from .acad import AcadSession
@@ -443,10 +499,9 @@ def _com_session() -> Any:
         raise CadError(
             "NO_BACKEND",
             "COM automation is not available on this system",
-            exit_code=ExitCode.MISSING_DEPENDENCY,
             hint="use --backend ezdxf (approximate) or run on Windows with a COM-capable CAD",
         ) from exc
-    return AcadSession.start()
+    return AcadSession.start(log=ctx.log if ctx is not None else None)
 
 
 # --------------------------------------------------------------------------------------
@@ -476,9 +531,8 @@ def _resolve_layouts(doc: Drawing, requested: list[str] | None, result: Result) 
         real = by_lower.get(want.lower())
         if real is None:
             raise CadError(
-                "BAD_ARGS",
+                "LAYOUT_NOT_FOUND",
                 f"layout {want!r} not found",
-                exit_code=ExitCode.BAD_ARGS,
                 hint="available: " + ", ".join(names),
             )
         if real not in out:
@@ -491,6 +545,7 @@ def _save_extras(
     box: tuple[float, float, float, float],
     stem: str,
     layout: str,
+    slug: str,
     crop: list[float] | None,
     tiles: tuple[int, int] | None,
     ctx: RunContext,
@@ -506,8 +561,8 @@ def _save_extras(
         if max(part.size) > MAX_CROP_SIDE_PX:
             part = cap_longest_side(part, MAX_CROP_SIDE_PX)
             result.warn(f"{layout}: crop is larger than {MAX_CROP_SIDE_PX}px, downscaled")
-        path = ctx.path(png_name(stem, layout, "__crop"))
-        part.save(path, "PNG")
+        path = ctx.path(png_name(stem, slug, "__crop"))
+        save_png(part, path)
         entries.append(
             {
                 "kind": "crop",
@@ -519,9 +574,9 @@ def _save_extras(
     if tiles is not None:
         cols, rows = tiles
         for col, row, tile_box in tile_boxes(region, cols, rows):
-            path = ctx.path(png_name(stem, layout, f"__tile-{col}-{row}"))
+            path = ctx.path(png_name(stem, slug, f"__tile-{col}-{row}"))
             tile = image.crop(tile_box)
-            tile.save(path, "PNG")
+            save_png(tile, path)
             entries.append(
                 {
                     "kind": "tile",
@@ -540,32 +595,27 @@ def _save_extras(
 def _run_render(args: argparse.Namespace) -> Result:
     from .runs import RunContext
 
+    ctx = RunContext.create("render", args.run_dir)  # first: errors below keep a run directory
     crop = parse_floats(args.crop, 4, "--crop") if args.crop else None
     tiles = parse_tiles(args.tiles) if args.tiles else None
     if args.dpi < 20 or args.dpi > 1200 or args.max_px < 64:
-        raise CadError(
-            "BAD_ARGS",
-            "--dpi must be 20..1200 and --max-px at least 64",
-            exit_code=ExitCode.BAD_ARGS,
-        )
+        raise CadError("BAD_ARGS", "--dpi must be 20..1200 and --max-px at least 64")
     ctb = args.ctb.expanduser() if args.ctb else None
     if ctb is not None and not ctb.is_file():
         raise CadError(
-            "BAD_ARGS",
-            f"--ctb file not found: {ctb}",
-            exit_code=ExitCode.BAD_ARGS,
-            hint="give the full path of a .ctb file",
+            "BAD_ARGS", f"--ctb file not found: {ctb}", hint="give the full path of a .ctb file"
         )
-    ctx = RunContext.create("render", args.run_dir)
     result = Result("render")
     deadline = Deadline(args.timeout)
     backend = args.backend
+    consent = args.allow_com or backend == "com"
     if backend == "auto":
         backend = "com" if (args.allow_com and _com_candidate()) else "ezdxf"
         if backend == "ezdxf" and _com_candidate() and not args.allow_com:
             result.next.append(
                 "a CAD plot is more faithful: ask the user, then run again with --backend com"
             )
+    args.allow_com = consent  # one consent for the plot and for a DWG conversion
     if backend == "com":
         try:
             return _render_com(args, ctx, result, deadline, crop, tiles)
@@ -589,16 +639,18 @@ def _finalize_png(
     backend: str,
     crop: list[float] | None,
     tiles: tuple[int, int] | None,
+    slug: str,
 ) -> None:
     stem = source.stem
     main = cap_longest_side(master, args.max_px)
-    path = ctx.path(png_name(stem, layout))
-    main.save(path, "PNG")
+    path = ctx.path(png_name(stem, slug))
+    save_png(main, path)
     extras = _save_extras(
         master,
         box,
         stem,
         layout,
+        slug,
         crop,
         tiles,
         ctx,
@@ -631,10 +683,8 @@ def _finish(
     args: argparse.Namespace,
 ) -> Result:
     manifest_path = ctx.path("render.json")
-    manifest_path.write_text(
-        json.dumps({"source": str(source), "renders": manifest}, ensure_ascii=False, indent=1),
-        encoding="utf-8",
-    )
+    text = json.dumps({"source": str(source), "renders": manifest}, ensure_ascii=False, indent=1)
+    atomic_write(manifest_path, lambda tmp: tmp.write_text(text, encoding="utf-8"))
     ctx.add_output(result, "manifest", manifest_path)
     if len(manifest) > MAX_LISTED_OUTPUTS:
         result.warn(
@@ -680,41 +730,38 @@ def _render_ezdxf(
         want_hires=crop is not None or tiles is not None,
     )
     manifest: list[dict[str, Any]] = []
-    loaded = open_drawing(args.file, ctx)
-    try:
-        for warning in loaded.warnings:
+    loaded = open_drawing(args.file, ctx, **_conversion(args))
+    for warning in loaded.warnings:
+        result.warn(warning)
+    if loaded.approximate:
+        result.warn("approximate DWG conversion: the render may lack some objects")
+    source = loaded.source
+    layouts = _resolve_layouts(loaded.doc, args.layout, result)
+    slugs = assign_slugs(layouts)
+    for warning in embed_xrefs(loaded.doc, source.parent):
+        result.warn(warning)
+    for i, name in enumerate(layouts):
+        deadline.check()
+        ctx.progress(i, len(layouts), f"rendering {name}")
+        ctx.log(f"render {name} (ezdxf)")
+        rendered = render_layout_ezdxf(loaded.doc, name, opts)
+        for warning in rendered.warnings:
             result.warn(warning)
-        if loaded.approximate:
-            result.warn("approximate DWG conversion: the render may lack some objects")
-        source = loaded.source
-        layouts = _resolve_layouts(loaded.doc, args.layout, result)
-        for warning in embed_xrefs(loaded.doc, source.parent):
-            result.warn(warning)
-        for i, name in enumerate(layouts):
-            deadline.check()
-            ctx.progress(i, len(layouts), f"rendering {name}")
-            ctx.log(f"render {name} (ezdxf)")
-            rendered = render_layout_ezdxf(loaded.doc, name, opts)
-            for warning in rendered.warnings:
-                result.warn(warning)
-            _finalize_png(
-                rendered.image,
-                rendered.box,
-                args,
-                name,
-                ctx,
-                result,
-                source,
-                manifest,
-                rendered.dpi,
-                "ezdxf",
-                crop,
-                tiles,
-            )
-        ctx.progress(len(layouts), len(layouts), "done")
-    finally:
-        loaded.cleanup()
+        _finalize_png(
+            rendered.image, rendered.box, args, name, ctx, result, source, manifest,
+            rendered.dpi, "ezdxf", crop, tiles, slugs[name],
+        )  # fmt: skip
+        rendered.image.close()
+    ctx.progress(len(layouts), len(layouts), "done")
     return _finish(result, ctx, manifest, "ezdxf", source, args)
+
+
+def _conversion(args: argparse.Namespace) -> dict[str, Any]:
+    """DWG conversion options: ``--allow-com`` is the shared consent, ``--convert-with`` the backend."""
+    options = conversion_options(args)
+    chosen = getattr(args, "convert_with", "auto")
+    options["prefer"] = None if chosen in (None, "auto") else chosen
+    return options
 
 
 def _render_com(
@@ -725,33 +772,30 @@ def _render_com(
     crop: list[float] | None,
     tiles: tuple[int, int] | None,
 ) -> Result:
-    source = Path(args.file).expanduser().resolve()
-    if not source.is_file():
-        raise CadError(
-            "FILE_NOT_FOUND",
-            f"file not found: {source}",
-            exit_code=ExitCode.PRECONDITION_FAILED,
-            hint="check the path",
-        )
+    from .runs import stage_copy
+
+    source = _resolve_source(args.file)
     names: list[str] = args.layout or []
     layout_box: dict[str, tuple[float, float, float, float]] = {}
     if not names or crop is not None or tiles is not None:
-        loaded = open_drawing(source, ctx)  # layout names and paper limits (no rendering)
-        try:
-            names = _resolve_layouts(loaded.doc, args.layout, result)
-            for name in names:
-                if name.lower() != "model":
-                    lo, hi = loaded.doc.layouts.get(name).get_paper_limits()
-                    layout_box[name] = (lo.x, lo.y, hi.x, hi.y)
-        finally:
-            loaded.cleanup()
+        loaded = open_drawing(source, ctx, **_conversion(args))  # layout names and paper limits
+        for warning in loaded.warnings:
+            result.warn(warning)
+        names = _resolve_layouts(loaded.doc, args.layout, result)
+        for name in names:
+            if name.lower() != "model":
+                lo, hi = loaded.doc.layouts.get(name).get_paper_limits()
+                layout_box[name] = (lo.x, lo.y, hi.x, hi.y)
+    slugs = assign_slugs(names)
     manifest: list[dict[str, Any]] = []
-    with _com_session() as session:
+    staged = stage_copy(source, ctx)  # CAD works on a copy: the original is never opened
+    with _com_session(ctx) as session:
         for i, name in enumerate(names):
             deadline.check()
             ctx.progress(i, len(names), f"plotting {name}")
-            pdf = ctx.path(f"{source.stem}__{_UNSAFE_NAME.sub('_', name)}.pdf")
-            session.plot_layout_pdf(source, name, pdf)
+            pdf = ctx.path(f"{source.stem}__{slugs[name]}.pdf")
+            for warning in session.plot_layout_pdf(staged, name, pdf) or []:
+                result.warn(warning)  # includes the PDF-viewer warning
             ctx.add_output(Result("render"), pdf.name, pdf, source)
             image = pdf_to_image(pdf, args.dpi, args.raster)
             box = layout_box.get(name, (0.0, 0.0, float(image.width), float(image.height)))
@@ -760,19 +804,12 @@ def _render_com(
             elif crop is not None:
                 result.warn(f"{name}: crop mapped assuming the plot area equals the paper limits")
             _finalize_png(
-                image,
-                box,
-                args,
-                name,
-                ctx,
-                result,
-                source,
-                manifest,
-                float(args.dpi),
-                "com",
-                crop,
-                tiles,
-            )
+                image, box, args, name, ctx, result, source, manifest,
+                float(args.dpi), "com", crop, tiles, slugs[name],
+            )  # fmt: skip
+            image.close()
+        for warning in getattr(session, "warnings", []) or []:
+            result.warn(warning)
     return _finish(result, ctx, manifest, "com", source, args)
 
 
@@ -785,7 +822,14 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--allow-com",
         action="store_true",
-        help="let --backend auto use a CAD plot (the user agreed)",
+        help="the user agreed to a CAD application: lets auto use a CAD plot and a DWG be "
+        "converted by it",
+    )
+    p.add_argument(
+        "--convert-with",
+        choices=("auto", "com", "oda", "libredwg"),
+        default="auto",
+        help="converter for a DWG input (auto = oda, libredwg; com needs consent)",
     )
     p.add_argument(
         "--dpi", type=int, default=DEFAULT_DPI, help=f"master resolution (default {DEFAULT_DPI})"
@@ -811,7 +855,9 @@ def _add_render_args(p: argparse.ArgumentParser) -> None:
         "--hide-layer", action="append", help="layer to leave out everywhere, repeatable"
     )
     p.add_argument("--run-dir", type=Path, default=None, help="base directory for run folders")
-    p.add_argument("--timeout", type=float, default=240.0, help="soft time limit in seconds")
+    p.add_argument(
+        "--timeout", type=float, default=100.0, help="soft time limit in seconds (default 100)"
+    )
 
 
 COMMANDS = {
@@ -823,7 +869,7 @@ COMMANDS = {
             "examples:\n"
             "  cad.py render plan.dxf --layout Sheet-A --max-px 1600\n"
             "  cad.py render plan.dwg --backend com --crop 0,0,200,150 --tiles 2x2\n"
-            "exit codes: 0 ok, 3 missing backend, 6 empty or invalid layout"
+            "exit codes: 0 ok, 2 bad arguments, 3 missing backend or package, 6 empty layout"
         ),
     ),
 }

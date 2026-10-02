@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import datetime as dt
 import json
+import math
 import os
 import platform
 import time
@@ -25,9 +26,15 @@ from typing import Any
 from . import doctor as _doctor
 from .command import Command
 from .result import CadError, ExitCode, Result
-from .runs import CACHE_NAME_RE, MANIFEST_NAME, RUN_ID_RE, pid_alive, runs_base
+from .runs import (
+    CACHE_NAME_RE,
+    MANIFEST_NAME,
+    RUN_ID_RE,
+    STALE_RUNNING_S,
+    pid_alive,
+    runs_base,
+)
 
-HEARTBEAT_FRESH_S = 600.0
 MAX_LISTED = 20
 MAX_ORPHAN_SCAN = 2000
 DAY_S = 86400.0
@@ -109,12 +116,12 @@ def scan_runs(base: Path, now: float | None = None) -> list[RunInfo]:
         status = _read_json(entry / "status.json") or {}
         updated = _parse_iso(status.get("updated"), 0.0)
         pid = status.get("pid")
+        running = status.get("state") == "running"
+        # a live owner protects its run; "running" with a dead owner is a crashed (failed) run
         active = (
-            status.get("state") == "running"
-            and now - updated < HEARTBEAT_FRESH_S
-            and isinstance(pid, int)
-            and pid_alive(pid)
+            running and now - updated < STALE_RUNNING_S and isinstance(pid, int) and pid_alive(pid)
         )
+        state = "failed" if running and not active else str(status.get("state", ""))
         files = [str(f) for f in (manifest or {}).get("files", []) if isinstance(f, str)]
         runs.append(
             RunInfo(
@@ -125,7 +132,7 @@ def scan_runs(base: Path, now: float | None = None) -> list[RunInfo]:
                 files=files,
                 active=active,
                 has_manifest=manifest is not None,
-                state=str(status.get("state", "")),
+                state=state,
             )
         )
     runs.sort(key=lambda r: r.started, reverse=True)
@@ -258,10 +265,23 @@ def report_orphans(folder: Path) -> list[dict[str, Any]]:
     return items
 
 
+def _positive_days(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive number of days")
+    return value
+
+
 def _add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--list", action="store_true", help="list runs with sizes (default action)")
     parser.add_argument(
-        "--older-than", type=float, metavar="DAYS", help="select runs/cache older than DAYS"
+        "--older-than",
+        type=_positive_days,
+        metavar="DAYS",
+        help="select runs/cache older than DAYS (a positive number)",
     )
     parser.add_argument(
         "--run", nargs="+", action="extend", default=[], metavar="RUN_ID", help="select runs by id"
@@ -295,6 +315,12 @@ def _resolve_ids(wanted: list[str], runs: list[RunInfo]) -> list[RunInfo]:
 def _run(args: argparse.Namespace) -> Result:
     base = runs_base(Path(args.run_dir) if args.run_dir else None)
     now = time.time()
+    if args.older_than is not None and not (math.isfinite(args.older_than) and args.older_than > 0):
+        raise CadError(
+            "BAD_ARGS",
+            "--older-than must be a positive number of days",
+            exit_code=ExitCode.BAD_ARGS,
+        )
     older_s = args.older_than * DAY_S if args.older_than is not None else None
     result = Result(command="cleanup", backend="none")
     runs = scan_runs(base, now)

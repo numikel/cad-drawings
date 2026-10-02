@@ -62,7 +62,7 @@ jobs:
         run: agentskills validate skills/cad-drawings
 
   minimal-dependencies:
-    name: imports with required dependencies only
+    name: required dependencies only, and no dependencies at all
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
@@ -70,14 +70,14 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.10"
-      - name: Create a venv with only the required dependencies
+      - name: Create venvs (required dependencies only, and the bare standard library)
         run: |
-          python -m venv "$RUNNER_TEMP/minimal"
-          "$RUNNER_TEMP/minimal/bin/python" -m pip install "ezdxf>=1.4.4" pypdfium2 pillow
+          python -m venv "$RUNNER_TEMP/required"
+          "$RUNNER_TEMP/required/bin/python" -m pip install "ezdxf>=1.4.4" pypdfium2 pillow matplotlib
+          python -m venv "$RUNNER_TEMP/bare"
       - name: Import test (optional packages must stay lazy)
         run: |
-          "$RUNNER_TEMP/minimal/bin/python" - <<'PY'
-          import json
+          "$RUNNER_TEMP/required/bin/python" - <<'PY'
           import subprocess
           import sys
 
@@ -86,24 +86,52 @@ jobs:
 
           commands = cad.load_commands()
           assert commands, "no commands registered"
-          optional = {"matplotlib", "pymupdf", "fitz", "jsonschema", "win32com", "pythoncom"}
+          optional = {"pymupdf", "fitz", "jsonschema", "win32com", "pythoncom"}
           loaded = sorted(optional & set(sys.modules))
           assert not loaded, f"optional packages imported at import time: {loaded}"
-
-          script = "skills/cad-drawings/scripts/cad.py"
-          proc = subprocess.run([sys.executable, script, "--help"], capture_output=True, text=True)
-          assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr
-
-          # doctor must work before anything optional is installed (stdlib only)
           proc = subprocess.run(
-              [sys.executable, "skills/cad-drawings/scripts/doctor.py"],
+              [sys.executable, "skills/cad-drawings/scripts/cad.py", "--help"],
               capture_output=True,
               text=True,
           )
-          assert "Traceback" not in proc.stderr, proc.stderr
-          assert "status" in json.loads(proc.stdout), proc.stdout
+          assert proc.returncode == 0 and "Traceback" not in proc.stderr, proc.stderr
           print("ok:", sorted(commands))
           PY
+      - name: Render a generated fixture with the required dependencies
+        env:
+          CAD_DRAWINGS_RUNS: ${{ runner.temp }}/runs
+        run: |
+          PY="$RUNNER_TEMP/required/bin/python"
+          "$PY" skills/cad-drawings/evals/make_fixtures.py --out "$RUNNER_TEMP/fixtures"
+          "$PY" skills/cad-drawings/scripts/cad.py render "$RUNNER_TEMP/fixtures/sheet_set.dxf"             --backend ezdxf > "$RUNNER_TEMP/render.json"
+          "$PY" - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = json.loads(Path(os.environ["RUNNER_TEMP"], "render.json").read_text("utf-8"))
+          assert data["status"] == "ok" and data["exit_code"] == 0, data
+          assert data["approximate"] is True, data
+          pngs = [Path(o["path"]) for o in data["outputs"].values() if o["path"].endswith(".png")]
+          assert len(pngs) == 2 and all(p.stat().st_size > 1000 for p in pngs), pngs
+          PY
+      - name: doctor and cleanup --list work with nothing installed (stdlib only)
+        run: |
+          BARE="$RUNNER_TEMP/bare/bin/python"
+          for args in "doctor" "cleanup --list"; do
+            set +e
+            CAD_DRAWINGS_RUNS="$RUNNER_TEMP/bare-runs" "$BARE" skills/cad-drawings/scripts/cad.py $args               > "$RUNNER_TEMP/out.json" 2> "$RUNNER_TEMP/err.txt"
+            code=$?
+            set -e
+            echo "cad.py $args -> exit $code"
+            if grep -q Traceback "$RUNNER_TEMP/err.txt" "$RUNNER_TEMP/out.json"; then
+              cat "$RUNNER_TEMP/err.txt"; echo "traceback in output"; exit 1
+            fi
+            if [ "$code" != "0" ] && [ "$code" != "3" ]; then echo "unexpected exit code"; exit 1; fi
+            "$BARE" -c "import json,sys; d=json.load(open(sys.argv[1], encoding='utf-8')); assert 'status' in d"               "$RUNNER_TEMP/out.json"
+          done
+          "$BARE" skills/cad-drawings/scripts/doctor.py > "$RUNNER_TEMP/doctor.json"
+          "$BARE" -c "import json,sys; assert 'status' in json.load(open(sys.argv[1], encoding='utf-8'))"             "$RUNNER_TEMP/doctor.json"
 
   slow:
     name: slow tests

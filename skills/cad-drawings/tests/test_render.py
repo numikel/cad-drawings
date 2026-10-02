@@ -460,13 +460,17 @@ def test_tiles_without_crop_cover_the_whole_page(sheet: Path, runs: Path) -> Non
 
 
 def test_bad_arguments(sheet: Path, runs: Path) -> None:
-    for argv in (["--crop", "1,2,3"], ["--tiles", "x"], ["--dpi", "5"], ["--layout", "Nope"]):
+    for argv in (["--crop", "1,2,3"], ["--tiles", "x"], ["--dpi", "5"]):
         with pytest.raises(CadError) as err:
             run_render([str(sheet), *argv], runs)
         assert err.value.code == "BAD_ARGS", argv
     with pytest.raises(CadError) as err:
         run_render([str(sheet), "--layout", "Nope"], runs)
+    assert err.value.code == "LAYOUT_NOT_FOUND" and err.value.exit_code == ExitCode.BAD_ARGS
     assert "Sheet-A" in (err.value.hint or "")
+    with pytest.raises(CadError) as err2:
+        run_render([str(sheet.parent / "missing.dxf")], runs)
+    assert err2.value.code == "FILE_NOT_FOUND" and err2.value.exit_code == ExitCode.BAD_ARGS
 
 
 def test_model_space_render_and_empty_model(fixtures_dir: Path, tmp_path: Path, runs: Path) -> None:
@@ -542,6 +546,7 @@ class FakeSession:
 
     def __init__(self) -> None:
         self.plotted: list[tuple[Path, str, Path]] = []
+        self.warnings: list[str] = ["session warning"]
 
     def __enter__(self) -> Self:
         return self
@@ -549,14 +554,17 @@ class FakeSession:
     def __exit__(self, *exc: object) -> None:
         return None
 
-    def plot_layout_pdf(self, src: Path, layout: str, dst: Path, *, page_setup: Any = None) -> None:
+    def plot_layout_pdf(
+        self, src: Path, layout: str, dst: Path, *, page_setup: Any = None
+    ) -> list[str]:
         self.plotted.append((src, layout, dst))
         _make_pdf(dst)
+        return [f"VIEWER_WARNING: close the PDF viewer ({layout})"]
 
 
 @contextlib.contextmanager
 def _patched_session(monkeypatch: pytest.MonkeyPatch, session: FakeSession) -> Iterator[None]:
-    monkeypatch.setattr(render, "_com_session", lambda: session)
+    monkeypatch.setattr(render, "_com_session", lambda ctx=None: session)
     monkeypatch.setattr(render, "_com_candidate", lambda: True)
     yield
 
@@ -568,7 +576,13 @@ def test_com_backend_plots_each_layout_and_rasterises(
     with _patched_session(monkeypatch, session):
         res = run_render([str(sheet), "--backend", "com", "--dpi", "72", "--max-px", "500"], runs)
     assert [(p[1]) for p in session.plotted] == ["Sheet-A", "Sheet-B"]
-    assert all(p[0] == sheet.resolve() and p[2].suffix == ".pdf" for p in session.plotted)
+    # CAD works on a staged copy inside the run directory, never on the original
+    assert all(p[0] != sheet.resolve() and p[0].name == sheet.name for p in session.plotted)
+    assert all(Path(res.run_dir) in p[0].parents for p in session.plotted)
+    assert all(p[2].suffix == ".pdf" for p in session.plotted)
+    # the plot's own warnings and the session's warnings reach the user
+    assert any("VIEWER_WARNING" in w and "Sheet-A" in w for w in res.warnings)
+    assert "session warning" in res.warnings
     assert res.backend == "com" and res.approximate is None
     assert not any("approximate render" in w for w in res.warnings)
     for layout in ("Sheet-A", "Sheet-B"):
@@ -608,7 +622,7 @@ def test_auto_prefers_ezdxf_unless_com_is_allowed(
 def test_com_unavailable_is_an_error_when_explicit_and_a_fallback_when_auto(
     sheet: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def broken() -> Any:
+    def broken(ctx: Any = None) -> Any:
         raise CadError(
             "NO_BACKEND", "no CAD found", exit_code=ExitCode.MISSING_DEPENDENCY, hint="use ezdxf"
         )
@@ -636,3 +650,144 @@ def test_many_layouts_keep_the_result_small(tmp_path: Path, runs: Path) -> None:
     assert len(res.to_json().encode("utf-8")) <= 4096
     manifest = json.loads(Path(res.outputs["manifest"]["path"]).read_text("utf-8"))
     assert len(manifest["renders"]) == render.MAX_LISTED_OUTPUTS + 3
+
+
+# --------------------------------------------------------------------------------------
+# hardening: consent, lazy imports, names, memory, atomic writes
+# --------------------------------------------------------------------------------------
+
+
+def test_a_run_directory_exists_even_when_the_arguments_are_bad(sheet: Path, runs: Path) -> None:
+    with pytest.raises(CadError):
+        run_render([str(sheet), "--crop", "1,2"], runs)
+    assert len(list(runs.glob("*-render-*"))) == 1
+
+
+def test_dwg_input_goes_through_ensure_dxf_with_the_shared_consent(
+    sheet: Path, runs: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from cadlib import convert as convert_module
+
+    calls: list[dict[str, Any]] = []
+
+    def fake(src: Path, ctx: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            path=sheet,
+            backend="libredwg",
+            approximate=True,
+            cached=False,
+            warnings=["from convert"],
+        )
+
+    monkeypatch.setattr(convert_module, "ensure_dxf", fake)
+    monkeypatch.setattr(render, "_com_candidate", lambda: False)  # never start real CAD
+    dwg = tmp_path / "plan.dwg"
+    dwg.write_bytes(b"AC1032")
+    res = run_render([str(dwg), "--layout", "Sheet-A", "--dpi", "30"], runs)
+    assert calls == [{"allow_com": False, "prefer": None}]
+    assert "from convert" in res.warnings and any("approximate" in w.lower() for w in res.warnings)
+    run_render([str(dwg), "--layout", "Sheet-A", "--dpi", "30", "--convert-with", "oda"], runs)
+    run_render([str(dwg), "--layout", "Sheet-A", "--dpi", "30", "--allow-com"], runs)
+    assert calls[1:] == [
+        {"allow_com": False, "prefer": "oda"},
+        {"allow_com": True, "prefer": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("module", "needle"),
+    [("matplotlib", "matplotlib"), ("PIL", "Pillow")],
+)
+def test_missing_packages_give_a_clean_dependency_error(
+    sheet: Path, runs: Path, monkeypatch: pytest.MonkeyPatch, module: str, needle: str
+) -> None:
+    monkeypatch.setitem(sys.modules, module, None)  # makes "import <module>" raise ImportError
+    if module == "matplotlib":
+        for name in list(sys.modules):
+            if name.startswith(("matplotlib.", "ezdxf.addons.drawing.matplotlib")):
+                monkeypatch.delitem(sys.modules, name)
+    with pytest.raises(CadError) as err:
+        run_render([str(sheet), "--layout", "Sheet-A", "--dpi", "30"], runs)
+    assert (
+        err.value.code == "MISSING_DEPENDENCY"
+        and err.value.exit_code == ExitCode.MISSING_DEPENDENCY
+    )
+    assert needle in err.value.message and "pip install" in (err.value.hint or "")
+
+
+def test_missing_pdf_rasteriser_is_a_clean_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pdf = tmp_path / "page.pdf"
+    _make_pdf(pdf)
+    monkeypatch.setitem(sys.modules, "pypdfium2", None)
+    monkeypatch.setitem(sys.modules, "pdf2image", None)
+    with pytest.raises(CadError) as err:
+        render.pdf_to_image(pdf, 72)
+    assert err.value.code == "MISSING_DEPENDENCY" and "pypdfium2" in (err.value.hint or "")
+
+
+def test_layout_names_that_sanitise_alike_get_distinct_files() -> None:
+    slugs = render.assign_slugs(["A/B", "A:B", "A_B", "a_b", "Other"])
+    assert slugs == {"A/B": "A_B", "A:B": "A_B-2", "A_B": "A_B-3", "a_b": "a_b-4", "Other": "Other"}
+    assert len({render.png_name("s", v) for v in slugs.values()}) == 5
+    assert render.assign_slugs(["x"]) == {"x": "x"}
+
+
+def test_master_size_cap_lowers_the_resolution(
+    sheet: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert render.MAX_MASTER_PIXELS == 50_000_000
+    monkeypatch.setattr(render, "MAX_MASTER_PIXELS", 200_000)
+    res = run_render([str(sheet), "--layout", "Sheet-A", "--dpi", "200"], runs)
+    manifest = json.loads(Path(res.outputs["manifest"]["path"]).read_text("utf-8"))["renders"][0]
+    width, height = manifest["master_px"]
+    assert width * height <= 200_000 * 1.02 and manifest["dpi"] < 200
+    assert any("size cap" in w for w in res.warnings)
+
+
+def test_pngs_are_written_atomically(
+    sheet: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    from cadlib import util
+
+    replaced: list[str] = []
+    real = os.replace
+
+    def spy(src: Any, dst: Any) -> None:
+        replaced.append(Path(dst).suffix)
+        real(src, dst)
+
+    monkeypatch.setattr(util.os, "replace", spy)
+    res = run_render([str(sheet), "--layout", "Sheet-A", "--dpi", "30", "--tiles", "2x1"], runs)
+    assert replaced.count(".png") >= 3  # main image and two tiles
+    assert not list(Path(res.run_dir).glob(".*.tmp"))
+
+
+def test_xref_on_a_network_path_is_skipped_without_touching_it(
+    tmp_path: Path, runs: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cadlib import util
+
+    doc = ezdxf.new("R2018")
+    doc.add_xref_def(filename="\\\\fileserver\\share\\site.dxf", name="NET")
+    doc.modelspace().add_circle((0, 0), 5)
+    path = tmp_path / "net.dxf"
+    doc.saveas(path)
+    touched: list[str] = []
+    real = Path.is_file
+
+    def spy(self: Path, *args: Any, **kwargs: Any) -> bool:
+        touched.append(str(self))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", spy)
+    assert not util.path_is_local("\\\\fileserver\\share\\site.dxf")
+    res = run_render([str(path), "--layout", "Model", "--max-px", "200"], runs)
+    assert not [t for t in touched if "fileserver" in t]
+    assert any("NET" in w and "not checked" in w for w in res.warnings)

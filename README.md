@@ -1,6 +1,6 @@
 # cad-drawings
 
-Inspect, compare, render, measure and edit CAD drawings in DWG and DXF format on Windows, macOS and Linux—without AutoCAD, or with native CAD automation when available. Works offline, preserves the original file, and outputs JSON summaries for automation.
+Inspect, compare, convert and render CAD drawings in DWG and DXF format on Windows, macOS and Linux—without AutoCAD, or with native CAD automation when you agree to it. Works offline, never modifies the source file, and outputs JSON summaries for automation. Editing, plotting and measuring commands are planned.
 
 ## What it is
 
@@ -9,9 +9,9 @@ A reusable agent skill (with CLI tools) that knows how to:
 - **Find** text, attributes, layer names, block names across all layouts and block definitions
 - **Render** layouts to PNG for visual inspection (from COM plots or ezdxf approximation)
 - **Compare** two revisions semantically, ignoring save noise
-- **Edit** drawings by handle with atomic validation and change logs
+- **Edit** drawings by handle with atomic validation and change logs (planned: F2; today a CAD session library, `cadlib.acad`, is available for custom scripts)
 - **Plot** sheets to PDF with explicit page setup (planned: F2)
-- **Measure** areas, lengths and coordinates in drawing units
+- **Measure** areas, lengths and coordinates in drawing units (planned: F3; today use `info`, `dump` and ezdxf)
 - **Convert** between DWG and DXF, with automatic backend selection
 - **Clean up** run directories and caches
 
@@ -85,7 +85,7 @@ All output goes to a fresh run directory (e.g., `/tmp/cad-drawings-runs/20261002
 | 3 | Missing backend or dependency (run `doctor` to see what to install) |
 | 4 | Resource busy (file is locked, document open elsewhere) |
 | 5 | Timeout |
-| 6 | Precondition failed (edit plan validation failed) |
+| 6 | Precondition not met (target exists, empty layout, confirmation missing) |
 | 7 | Partial success (some outputs produced, some failed) |
 
 ## Safety model
@@ -105,8 +105,8 @@ The run directory is NOT deleted; use `cad.py cleanup` to remove old runs.
 | Read DXF | ✓ | ✓ | ✓ |
 | Read DWG | COM / ODA / LibreDWG | ODA / LibreDWG | ODA / LibreDWG |
 | Render preview | COM / ezdxf | ezdxf | ezdxf |
-| Edit DWG native | COM (AutoCAD/BricsCAD) | — | — |
-| Plot native | COM (AutoCAD) | — | — |
+| Edit DWG native (planned: F2) | COM (AutoCAD/BricsCAD) | — | — |
+| Plot native (planned: F2; `render --allow-com` plots previews today) | COM (AutoCAD) | — | — |
 | Convert DWG ↔ DXF | COM / ODA / LibreDWG | ODA / LibreDWG | ODA / LibreDWG |
 
 ## Dependencies and licenses
@@ -117,10 +117,11 @@ All required dependencies are permissive open-source licenses. Optional dependen
 |---|---|---|---|
 | ezdxf | MIT | Read/analyze DXF | Always present |
 | pypdfium2 | Apache-2.0 / BSD-3 | PDF → PNG rasterization | Default backend |
-| Pillow, numpy, fonttools | MIT / BSD | Transitive (ezdxf) | Permissive |
+| Pillow | HPND-like | Direct (image resize/crop) | Permissive |
+| numpy, fonttools, pyparsing | BSD / MIT | Transitive (ezdxf, matplotlib) | Permissive |
 | pywin32 | PSF / BSD | COM on Windows | Windows only, optional |
-| matplotlib | PSF-based | Optional ezdxf backend | Permissive |
-| PyMuPDF | **AGPL-3.0** | Optional PDF → PNG (faster) | Copyleft; loaded only if present |
+| matplotlib | PSF-based | Required (raster backend of the approximate render) | Permissive |
+| PyMuPDF | **AGPL-3.0** | Optional PDF → PNG (faster) | Copyleft; imported only with `render --raster pymupdf` |
 | Poppler | **GPL** | Optional PDF → PNG (last resort) | GPL; external tool, not bundled |
 | LibreDWG | **GPL-3.0+** | DWG ↔ DXF conversion | External tool, fallback, not bundled |
 | ODA File Converter | Proprietary freeware | DWG ↔ DXF conversion | Users download directly, not bundled |

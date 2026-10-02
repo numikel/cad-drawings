@@ -7,6 +7,8 @@ plain functions and have their own positive and negative samples at the bottom o
 
 from __future__ import annotations
 
+import ast
+import enum
 import importlib
 import json
 import re
@@ -412,7 +414,7 @@ def test_evals_json_structure(fixtures_dir: Path) -> None:
     data = _load_json("evals.json")
     assert data["skill_name"] == SKILL.name
     evals = data["evals"]
-    assert [e["id"] for e in evals] == list(range(1, len(evals) + 1)) and len(evals) == 5
+    assert [e["id"] for e in evals] == list(range(1, len(evals) + 1)) and len(evals) == 6
     catalog = set(data["mechanical_check_catalog"])
     for e in evals:
         assert e["prompt"].strip() and e["expected_output"].strip(), e["id"]
@@ -420,7 +422,11 @@ def test_evals_json_structure(fixtures_dir: Path) -> None:
         assert e["mechanical_checks"] and set(e["mechanical_checks"]) <= catalog, e["id"]
         for rel in e["files"]:
             assert rel.startswith("evals/fixtures/"), rel
-            assert (fixtures_dir / Path(rel).name).is_file(), f"{rel} is not made by make_fixtures"
+            name = Path(rel).name
+            if e.get("requires_cad"):  # a DWG made locally from the DXF; never committed
+                assert e["fixture_setup"].strip() and name.endswith(".dwg")
+                name = Path(name).with_suffix(".dxf").name
+            assert (fixtures_dir / name).is_file(), f"{rel} is not made by make_fixtures"
             assert rel in e["prompt"], f"prompt of eval {e['id']} must name {rel}"
 
 
@@ -441,6 +447,10 @@ def test_evals_json_numbers_match_ground_truth(
     for sheet in files["sheet_set.dxf"]["layouts"]:
         for field in sheet["title_block"].values():
             assert field["value"] in texts[1]
+            assert field["value"] in texts[6]
+        (viewport,) = sheet["viewports"]
+        assert viewport["view_center_wcs"] == [4000.0, 3250.0]
+        assert viewport["view_center_is_dcs"] is True
 
     assert len(changes["real_changes"]) == 3 and "exactly 3 real changes" in texts[3]
     assert [c["kind"] for c in changes["real_changes"]] == [
@@ -565,3 +575,260 @@ def test_frontmatter_parser_and_validator() -> None:
         assert frontmatter_problems(bad, "a"), bad
     with pytest.raises(ValueError):
         split_frontmatter("no frontmatter")
+
+
+# --------------------------------------------------------------------------------------
+# documentation against the code (flags, exit codes, README, third-party notices)
+# --------------------------------------------------------------------------------------
+
+REPO = SKILL.parents[1]
+README = REPO / "README.md"
+NOTICES = REPO / "THIRD_PARTY_NOTICES.md"
+FLAG_RE = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
+
+# import name -> distribution name, for third-party packages the code may import
+DISTRIBUTIONS = {
+    "ezdxf": "ezdxf",
+    "PIL": "Pillow",
+    "pypdfium2": "pypdfium2",
+    "matplotlib": "matplotlib",
+    "numpy": "numpy",
+    "win32com": "pywin32",
+    "pythoncom": "pywin32",
+    "pywintypes": "pywin32",
+    "win32api": "pywin32",
+    "win32con": "pywin32",
+    "win32process": "pywin32",
+    "winreg": None,  # standard library on Windows
+    "pymupdf": "PyMuPDF",
+    "fitz": "PyMuPDF",
+    "jsonschema": "jsonschema",
+    "shapely": "shapely",
+}
+LOCAL_MODULES = {"cadlib", "cad", "doctor"}
+
+
+def command_spans(text: str) -> list[str]:
+    """Text that looks like a command line: shell/untagged fenced lines and inline code."""
+    spans: list[str] = []
+    for lang, lines in _fenced_blocks(text):
+        if lang in SHELL_FENCES:
+            spans += [re.sub(r"^\s*(?:\$|>)\s+", "", line) for line in lines]
+    spans += re.findall(r"(?<!`)`([^`\n]+)`(?!`)", text)
+    return spans
+
+
+def command_flag_uses(text: str, names: set[str]) -> list[tuple[str, str]]:
+    """(command, flag) for every flag written after a registered command name in one span.
+
+    The command is the token after ``cad.py`` or, in a bare reference line, the first token.
+    """
+    uses: list[tuple[str, str]] = []
+    for span in command_spans(text):
+        tokens = span.split()
+        start = next(
+            (i + 1 for i, t in enumerate(tokens[:-1]) if t.rstrip("`").endswith("cad.py")), 0
+        )
+        if start >= len(tokens) or tokens[start] not in names:
+            continue
+        uses += [(tokens[start], f) for f in FLAG_RE.findall(" ".join(tokens[start + 1 :]))]
+    return uses
+
+
+def documented_exit_codes(text: str) -> list[tuple[int, str]]:
+    """(code, description) from 'Exit codes: 0 = ok, 1 = ...' lines and from tables in an
+    'Exit codes' section."""
+    pairs: list[tuple[int, str]] = []
+    in_section = False
+    for line in text.splitlines():
+        if re.match(r"^#{1,6}\s", line):
+            in_section = bool(re.search(r"exit codes?", line, re.IGNORECASE))
+        if re.match(r"^\W*Exit codes?\b", line, re.IGNORECASE):
+            pairs += [
+                (int(n), d.strip().lower()) for n, d in re.findall(r"(\d)\s*=\s*([^,;.]+)", line)
+            ]
+        elif in_section and (row := re.match(r"^\|\s*(\d)\s*\|\s*(.+?)\s*\|", line)):
+            pairs.append((int(row.group(1)), row.group(2).lower()))
+    return pairs
+
+
+def exit_code_problems(pairs: list[tuple[int, str]], exit_code_enum: Any) -> list[str]:
+    problems = []
+    members = {int(c): c for c in exit_code_enum}
+    missing = sorted(set(members) - {n for n, _ in pairs})
+    extra = sorted({n for n, _ in pairs} - set(members))
+    if missing:
+        problems.append(f"codes not documented: {missing}")
+    if extra:
+        problems.append(f"documented codes that are not ExitCode members: {extra}")
+    extra_words = {
+        "OK": {"ok", "success"},
+        "BAD_ARGS": {"argument"},
+        "MISSING_DEPENDENCY": {"backend"},
+    }
+    for number, description in pairs:
+        member = members.get(number)
+        if member is None:
+            continue
+        words = set(member.name.lower().split("_")) | extra_words.get(member.name, set())
+        if not any(w in description for w in words):
+            problems.append(f"{number} is described as {description!r}, but is {member.name}")
+    return problems
+
+
+def readme_unregistered_commands(text: str, registered: set[str]) -> list[str]:
+    """Commands the README advertises that do not exist, unless the line says 'planned'."""
+    bad = []
+    for line in text.splitlines():
+        if "planned" in line.lower():
+            continue
+        names = {n for n, _ in cad_commands_mentioned(line)}
+        names |= {n for n in FUTURE_COMMANDS if f"`{n}`" in line}
+        bad += [f"{n}: {line.strip()}" for n in sorted(names) if n not in registered]
+    return bad
+
+
+def module_level_imports(source: str) -> set[str]:
+    """Top-level package names imported when the module is imported (not in functions,
+    not under ``if TYPE_CHECKING``)."""
+    names: set[str] = set()
+
+    def visit(body: list[Any]) -> None:
+        for node in body:
+            if isinstance(node, ast.Import):
+                names.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0 and node.module:
+                    names.add(node.module.split(".")[0])
+            elif isinstance(node, ast.If):
+                if "TYPE_CHECKING" not in ast.unparse(node.test):
+                    visit(node.body)
+                visit(node.orelse)
+            elif isinstance(node, ast.Try):
+                visit(node.body)
+                for handler in node.handlers:
+                    visit(handler.body)
+                visit(node.orelse)
+                visit(node.finalbody)
+
+    visit(ast.parse(source).body)
+    return names
+
+
+def third_party_distributions(source: str) -> set[str]:
+    stdlib = set(sys.stdlib_module_names)
+    result = set()
+    for name in module_level_imports(source) - stdlib - LOCAL_MODULES:
+        dist = DISTRIBUTIONS.get(name, name)
+        if dist:
+            result.add(dist)
+    return result
+
+
+def _help_flags(command: str, cache: dict[str, set[str]]) -> set[str]:
+    if command not in cache:
+        cache[command] = set(FLAG_RE.findall(_run_cad(command, "--help").stdout)) | {"--help"}
+    return cache[command]
+
+
+def test_documented_flags_exist_in_command_help(commands: dict[str, Any]) -> None:
+    docs = {}
+    if SKILL_MD.is_file():
+        docs[SKILL_MD] = SKILL_MD.read_text(encoding="utf-8")
+    if README.is_file():
+        docs[README] = README.read_text(encoding="utf-8")
+    if not docs:
+        pytest.skip("neither SKILL.md nor README.md delivered yet (track T3)")
+    cache: dict[str, set[str]] = {}
+    unknown = []
+    for path, text in docs.items():
+        for command, flag in command_flag_uses(text, set(commands)):
+            if flag not in _help_flags(command, cache):
+                unknown.append(f"{path.name}: {command} {flag}")
+    assert not unknown, f"flags missing from `cad.py <command> --help`: {sorted(set(unknown))}"
+
+
+def test_documented_exit_codes_match_exit_code_enum() -> None:
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        exit_code = importlib.import_module("cadlib.result").ExitCode
+    finally:
+        sys.path.remove(str(SCRIPTS))
+    checked = 0
+    for path in (SKILL_MD, README):
+        if not path.is_file():
+            continue
+        pairs = documented_exit_codes(path.read_text(encoding="utf-8"))
+        if path == SKILL_MD:
+            assert pairs, "SKILL.md lists no exit codes"
+        if pairs:
+            checked += 1
+            problems = exit_code_problems(pairs, exit_code)
+            assert not problems, (path.name, problems)
+    if not checked:
+        pytest.skip("neither SKILL.md nor README.md delivered yet (track T3)")
+
+
+def test_readme_advertises_only_registered_commands(commands: dict[str, Any]) -> None:
+    if not README.is_file():
+        pytest.skip("README.md not delivered yet (track T3)")
+    bad = readme_unregistered_commands(README.read_text(encoding="utf-8"), set(commands))
+    assert not bad, f"README names commands that are not registered (mark them 'planned'): {bad}"
+
+
+def test_third_party_notices_cover_imported_distributions() -> None:
+    if not NOTICES.is_file():
+        pytest.skip("THIRD_PARTY_NOTICES.md not delivered yet (track T3)")
+    notices = NOTICES.read_text(encoding="utf-8").lower()
+    needed: dict[str, list[str]] = {}
+    for path in [*(SCRIPTS / "cadlib").glob("*.py"), *SCRIPTS.glob("*.py")]:
+        for dist in third_party_distributions(path.read_text(encoding="utf-8")):
+            needed.setdefault(dist, []).append(path.name)
+    assert needed, "scan found no third-party imports; the scanner is broken"
+    missing = {d: files for d, files in needed.items() if d.lower() not in notices}
+    assert not missing, f"THIRD_PARTY_NOTICES.md does not mention: {missing}"
+
+
+def test_doc_checkers_samples() -> None:
+    names = {"info", "render", "find"}
+    text = (
+        "```bash\npython scripts/cad.py render a.dxf --dpi 150 --nope\n```\n"
+        "Reference lines:\n```\nfind <file> [--pattern RE] [-i]\n```\n"
+        "Inline `info <file> --conventions` and prose --ignored here and `ls --all`."
+    )
+    assert command_flag_uses(text, names) == [
+        ("render", "--dpi"),
+        ("render", "--nope"),
+        ("find", "--pattern"),
+        ("info", "--conventions"),
+    ]
+
+    class Codes(enum.IntEnum):
+        OK = 0
+        BAD_ARGS = 2
+        PARTIAL = 7
+
+    good = documented_exit_codes("Exit codes: 0 = success, 2 = bad arguments, 7 = partial success.")
+    assert good == [(0, "success"), (2, "bad arguments"), (7, "partial success")]
+    assert exit_code_problems(good, Codes) == []
+    assert exit_code_problems(good[:2], Codes)  # 7 not documented
+    assert exit_code_problems([*good, (9, "other")], Codes)  # not a member
+    assert exit_code_problems([(0, "success"), (2, "timeout"), (7, "partial")], Codes)
+    table = "## Exit codes\n\n| Code | Meaning |\n|---|---|\n| 0 | Success |\n| 7 | Partial |\n"
+    assert documented_exit_codes(table) == [(0, "success"), (7, "partial")]
+    assert documented_exit_codes("## Other\n| 1 | x |\n") == []
+
+    readme = "Use `plot` soon.\n- `plot` (planned)\nRun cad.py info and cad.py bogus.\n"
+    assert readme_unregistered_commands(readme, {"info"}) == [
+        "plot: Use `plot` soon.",
+        "bogus: Run cad.py info and cad.py bogus.",
+    ]
+
+    source = (
+        "import os, ezdxf.bbox\nfrom PIL import Image\nfrom . import x\n"
+        "try:\n    import win32com.client\nexcept ImportError:\n    pass\n"
+        "if TYPE_CHECKING:\n    import numpy\n"
+        "def f():\n    import matplotlib\n"
+    )
+    assert module_level_imports(source) == {"os", "ezdxf", "PIL", "win32com"}
+    assert third_party_distributions(source) == {"ezdxf", "Pillow", "pywin32"}

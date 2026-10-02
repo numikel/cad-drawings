@@ -7,11 +7,12 @@ dependencies = [
     "ezdxf>=1.4.4",
     "pypdfium2>=5",
     "pillow",
+    "matplotlib",
     "pywin32>=312; sys_platform == 'win32'",
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "mypy", "matplotlib", "jsonschema"]
+dev = ["pytest", "ruff", "mypy", "jsonschema"]
 
 [tool.pytest.ini_options]
 testpaths = ["skills/cad-drawings/tests"]
