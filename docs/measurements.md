@@ -53,13 +53,26 @@ A real plot of the twisted sheet also confirmed the geometry-based `prints_on` f
 
 **A finding from this round.** In the first no-CAD run the agent read a conversion that an earlier, consented task had left in the shared cache, which skipped the path we wanted to test. The agent said so, and the result was still correct, but the cache is shared across tasks. We moved it aside and repeated the run (the row above). Whether a cached conversion made with consent may be reused for a task without consent is a design decision for the next phase.
 
+## First check on real drawings (2026-10-03)
+
+Two real DWG drawings supplied by the maintainer (two revisions of an A1 sheet set: 117 and 118 layers, about 750 block definitions, 4 viewports, 8 bound external references, 12 000 entities each; 0.7 to 0.9 MB). They are not published. Two defects that no synthetic drawing had exposed were found and fixed:
+
+| Found on a real drawing | Cause | Fix |
+|---|---|---|
+| A plot through the CAD application came out as an almost empty page while the command reported success | `RefreshPlotDeviceInfo` was called on a layout that already had a PDF plotter and reset its plot setup (found by bisecting the library's steps, each in a fresh CAD session; it did not reproduce on a synthetic layout) | Refresh only after a device change; `plot` and `render` now fail with `PLOT_BAD_OUTPUT` when a PDF has almost no drawing content |
+| `edit` on a DWG ended with exit 7 although the text was changed correctly | CAD recomputes the insertion point of aligned text after the string changes (a shift of 0.0008 units), so the diff saw one removed and one added entity | Entities left unmatched are paired as one change when type, scope and layer agree and the anchor moved by a hair or the handle is the same |
+
+After the fixes on the same files: every command ran without leftover processes, a full plot of both layouts (about 45 000 objects each) took 39 s, the edit was verified (1 change, 0 unintended, original unchanged), and the diff of the two revisions (7 000 changed entities, a genuinely restructured drawing, checked for a global shift: none) is summarised per layer and entity type within the size cap.
+
+Two drawings from one office are a small sample; they say nothing about other CAD versions, drawings with external references on disk, or very large files.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
 
 ## Not yet measured
 
-- Real-world drawings from outside the synthetic set (all tests use synthetic fixtures).
+- More real-world drawings: only two real files have been checked, and none with external references on disk or with other CAD versions.
 - Behaviour on macOS and Linux outside CI (rendering and conversion are portable; CAD automation is Windows-only).
 - Other CAD applications that expose the same COM interface (BricsCAD, ZWCAD, GstarCAD are detected but untested).
 
