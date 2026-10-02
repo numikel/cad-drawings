@@ -273,8 +273,7 @@ def _save_ctb(ctb: Any, path: Path) -> None:
     content = mem.getvalue()
     body = zlib.compress(content.encode())
     with open(path, "wb") as stream:
-        stream.write(b"PIAFILEVERSION_2.0,CTBVER1,compress
-pmzlibcodec")
+        stream.write(b"PIAFILEVERSION_2.0,CTBVER1,compress\r\npmzlibcodec")
         stream.write(struct.pack("<LLL", zlib.adler32(body), len(content), len(body)))
         stream.write(body)
 
