@@ -2,6 +2,6 @@
 
 # Modules that may define COMMANDS (see command.py). Missing modules are skipped, so tracks can
 # land independently. Order = order in `--help`.
-MODULES = ("doctor", "dxf", "convert", "render", "runs", "edit", "plot")
+MODULES = ("doctor", "dxf", "convert", "render", "cleanup", "edit", "plot")
 
 __version__ = "0.1.0"
