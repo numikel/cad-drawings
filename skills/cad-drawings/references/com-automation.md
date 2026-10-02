@@ -138,6 +138,10 @@ if "old" in plain:
     entity.dxf.text = raw_value
 ```
 
+## Plotting: do not refresh a layout's plot device
+
+`Layout.RefreshPlotDeviceInfo()` is needed after you assign a different plotter (`ConfigName`) so that the list of paper sizes is current. Calling it on a layout that already has a working PDF plotter resets the layout's plot setup to the device defaults, and the PDF can come out almost empty (a few strokes instead of the sheet). A real 45 000-object plan plotted completely without the call and as 3 objects with it. Change the device only when the layout has none or a non-PDF one, refresh only then, and always check the output: `plot` fails with `PLOT_BAD_OUTPUT` when the PDF has almost no drawing content, because AutoCAD reports success for an empty plot.
+
 ## Window selection and rectangular regions
 
 SelectionSet filtering by window requires the document's `ActiveLayout` to be set and often requires `ZoomWindow` first:

@@ -579,6 +579,25 @@ def _pdf_info(path: Path) -> tuple[int, tuple[float, float]] | None:
         pdf.close()
 
 
+MIN_PDF_OBJECTS = 8  # a sheet with a frame, text and linework has far more; an empty plot has 3
+
+
+def _pdf_object_count(path: Path) -> int | None:
+    """Number of drawing objects on the first page; None when it cannot be determined."""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(str(path))
+    except Exception:  # noqa: BLE001 - unreadable or pypdfium2 missing: unknown, not an error
+        return None
+    try:
+        return sum(1 for _ in pdf[0].get_objects())
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        pdf.close()
+
+
 def _double_array(values: tuple[float, ...]) -> Any:
     com = _com()
     return com.client.VARIANT(com.pythoncom.VT_ARRAY | com.pythoncom.VT_R8, list(values))
@@ -1278,7 +1297,9 @@ class AcadSession:
         units = _PAPER_UNITS_TO_MM.get(retry_expr(lambda: lay.PaperUnits))
         size_mm = (width * units, height * units) if units and width and height else None
         current = str(retry_expr(lambda: lay.ConfigName) or "")
-        retry_expr(lambda: lay.RefreshPlotDeviceInfo())
+        # No RefreshPlotDeviceInfo() here: on a layout that already has a PDF plotter it resets the
+        # plot setup (area, origin, scale) to the device defaults and the PDF comes out almost
+        # empty (found on a real drawing). It is only needed after the device is changed, below.
         devices = [str(d) for d in (retry_expr(lambda: lay.GetPlotDeviceNames()) or ())]
 
         device = ps.get("device")
@@ -1377,6 +1398,14 @@ class AcadSession:
         pages, size = info
         if pages != 1:
             raise CadError("PLOT_BAD_OUTPUT", f"PDF has {pages} pages, expected 1")
+        objects = _pdf_object_count(path)
+        if objects is not None and objects < MIN_PDF_OBJECTS:
+            raise CadError(
+                "PLOT_BAD_OUTPUT",
+                f"the PDF has almost no drawing content ({objects} objects on the page)",
+                hint="the layout's plot setup was probably reset or its viewports did not "
+                "regenerate; compare with `render --backend ezdxf` and check the page setup",
+            )
         if media is None:
             return ["PDF page size was not compared with the media (media size unknown)"]
         if not sizes_match(size, media):

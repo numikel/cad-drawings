@@ -904,6 +904,9 @@ def test_configure_plot_keeps_a_working_pdf_setup(clock: Clock) -> None:
     lay.set_calls.clear()
     warnings: list[str] = []
     media = make_session()._configure_plot(lay, {}, warnings)
+    # regression found on a real drawing: RefreshPlotDeviceInfo() resets the layout's plot setup to
+    # the device defaults and the PDF came out (almost) empty; it is only needed after a device change
+    assert lay.refreshed == 0
     assert lay.set_calls == [] and warnings == [] and media == (420.0, 297.0)
 
 
@@ -1613,3 +1616,32 @@ def test_com_watchdog_terminates_own_instance_when_a_call_blocks(
     finally:
         session.quit()
     assert not acad._list_pids(image)
+
+
+def _pdf_file(tmp_path: Path) -> Path:
+    path = tmp_path / "x.pdf"
+    path.write_bytes(b"%PDF-1.7 fake")
+    return path
+
+
+def test_verify_pdf_rejects_a_page_with_almost_no_drawing_content(
+    clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: (1, (420.0, 297.0)))
+    monkeypatch.setattr(acad, "_pdf_object_count", lambda p: 3)
+    with pytest.raises(CadError) as err:
+        make_session()._verify_pdf(_pdf_file(tmp_path), (420.0, 297.0))
+    assert err.value.code == "PLOT_BAD_OUTPUT" and "content" in err.value.message
+
+
+def test_verify_pdf_accepts_a_page_with_content_and_an_unknown_count(
+    clock: Clock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: (1, (420.0, 297.0)))
+    for count in (5000, None):  # None: the count could not be determined, do not fail on that
+        monkeypatch.setattr(acad, "_pdf_object_count", lambda p, c=count: c)
+        assert make_session()._verify_pdf(_pdf_file(tmp_path), (420.0, 297.0)) == []
+
+
+def test_pdf_object_count_is_none_for_a_file_it_cannot_read(tmp_path: Path) -> None:
+    assert acad._pdf_object_count(_pdf_file(tmp_path)) is None
