@@ -1,0 +1,31 @@
+# Local-only working material (plan, old skill snapshot, scratch, RED baseline transcripts).
+# Contains client-derived context; must never be published.
+_local/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated artifacts
+**/evals/fixtures/
+**/evals/workspace/
+*.dwl
+*.dwl2
+*.bak
+*_recover.dwg
+_cad_runs/
+
+# Vendor files that must never enter the repo (see AGENTS.md)
+*.pc3
+*.pmp
+*.ctb
+*.stb
+*.shx
+*.lin
+*.pat
+*.dwt
+*.tlb
+gen_py/

@@ -1,0 +1,26 @@
+[project]
+name = "cad-drawings-dev"
+version = "0.0.0"
+description = "Dev environment for the cad-drawings agent skill (not a distributable package)."
+requires-python = ">=3.10"
+dependencies = [
+    "ezdxf>=1.4.4",
+    "pypdfium2>=5",
+    "pillow",
+    "pywin32>=312; sys_platform == 'win32'",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "mypy", "matplotlib", "jsonschema"]
+
+[tool.pytest.ini_options]
+testpaths = ["skills/cad-drawings/tests"]
+markers = [
+    "com: needs a local CAD application via COM; run manually, one at a time",
+    "slow: large fixtures; needs CAD_DRAWINGS_RUN_SLOW=1",
+]
+addopts = "-m 'not com'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

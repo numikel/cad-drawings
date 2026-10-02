@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/cad-drawings/edit-spec.schema.json",
+  "title": "cad-drawings edit plan",
+  "description": "Input of `cad.py edit --spec edits.json`. Every edit targets one entity by handle and carries the state the agent expects to find. The executor checks `expect` before touching anything; a mismatch aborts that edit (exit 6) and nothing is written in --dry-run. Handles are valid only for the exact file version named in `base`.",
+  "type": "object",
+  "required": ["version", "base", "edits"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "base": {
+      "type": "object",
+      "required": ["path", "sha1"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "description": "Drawing the handles were read from." },
+        "sha1": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "Hash of that file; the executor refuses a plan whose base changed." }
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "description": "Edited copy to write. Default: a new file in the run directory. The original is never modified." },
+        "overwrite": { "type": "boolean", "default": false, "description": "Needed only if `path` already exists." }
+      }
+    },
+    "note": { "type": "string", "description": "Free text kept in the change log (why the change is made)." },
+    "edits": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/edit" }
+    }
+  },
+  "$defs": {
+    "expect": {
+      "type": "object",
+      "description": "Preconditions on the target as currently found. Give at least `type`.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string", "description": "DXF entity type, e.g. TEXT, MTEXT, INSERT, LINE, VIEWPORT." },
+        "layer": { "type": "string" },
+        "space": { "type": "string", "description": "'model', a layout name, or 'block:<name>'." },
+        "text": { "type": "string", "description": "Current text. For MTEXT compared against the raw string unless `text_is_plain` is true." },
+        "text_is_plain": { "type": "boolean", "default": false },
+        "attrib": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Tag -> current value for INSERT attributes." },
+        "insert": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 3, "description": "Current insertion point." },
+        "tolerance": { "type": "number", "default": 1e-6 }
+      }
+    },
+    "edit": {
+      "type": "object",
+      "required": ["id", "op", "handle", "expect"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Unique within the plan; appears in changes.jsonl." },
+        "op": { "enum": ["replace-text", "set-props", "delete", "move", "clone", "pan-viewport"] },
+        "handle": { "type": "string", "pattern": "^[0-9A-Fa-f]+$" },
+        "expect": { "$ref": "#/$defs/expect" },
+        "args": {
+          "type": "object",
+          "description": "Operation arguments.",
+          "additionalProperties": false,
+          "properties": {
+            "old": { "type": "string", "description": "replace-text: substring or exact raw text to replace. Must occur exactly once unless `count` is given." },
+            "new": { "type": "string", "description": "replace-text: replacement. MTEXT formatting codes outside the match are preserved." },
+            "count": { "type": "integer", "minimum": 1 },
+            "props": {
+              "type": "object",
+              "description": "set-props: DXF property -> value (layer, color, height, rotation, ...).",
+              "additionalProperties": true
+            },
+            "vector": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 3, "description": "move: displacement; clone: offset of the copy from the source." },
+            "target_layer": { "type": "string", "description": "clone: layer of the copy (default: source layer)." },
+            "target_space": { "type": "string", "description": "clone: layout or model space that receives the copy (default: source space)." },
+            "view_center": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 3, "description": "pan-viewport: new model-space view center. Scale and size stay unchanged." }
+          }
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "op": { "const": "replace-text" } } }, "then": { "required": ["args"], "properties": { "args": { "required": ["old", "new"] } } } },
+        { "if": { "properties": { "op": { "const": "set-props" } } }, "then": { "required": ["args"], "properties": { "args": { "required": ["props"] } } } },
+        { "if": { "properties": { "op": { "const": "move" } } }, "then": { "required": ["args"], "properties": { "args": { "required": ["vector"] } } } },
+        { "if": { "properties": { "op": { "const": "clone" } } }, "then": { "required": ["args"], "properties": { "args": { "required": ["vector"] } } } },
+        { "if": { "properties": { "op": { "const": "pan-viewport" } } }, "then": { "required": ["args"], "properties": { "args": { "required": ["view_center"] } } } }
+      ]
+    }
+  }
+}

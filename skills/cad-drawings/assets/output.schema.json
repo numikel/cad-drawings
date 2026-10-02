@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/cad-drawings/output.schema.json",
+  "title": "cad-drawings command summary",
+  "description": "Short JSON printed on stdout by every scripts/cad.py command and by scripts/doctor.py. Keep it under ~4 KB: large data goes to files in run_dir and is referenced from outputs.",
+  "type": "object",
+  "required": ["status", "command", "exit_code"],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "enum": ["ok", "error", "partial", "refused"],
+      "description": "ok = exit 0; partial = exit 7; refused = the command declined on purpose (missing backend, unsafe target); error = anything else."
+    },
+    "command": { "type": "string", "description": "Subcommand that ran, e.g. 'info', 'render'." },
+    "exit_code": {
+      "type": "integer",
+      "enum": [0, 1, 2, 3, 4, 5, 6, 7],
+      "description": "0 ok, 1 error, 2 bad arguments, 3 missing dependency or backend, 4 resource busy (lock, document open elsewhere), 5 timeout, 6 edit precondition not met, 7 partial success."
+    },
+    "backend": {
+      "type": "string",
+      "description": "Backend that did the work: com, ezdxf, oda, libredwg, pypdfium2, pymupdf, none."
+    },
+    "approximate": {
+      "type": "boolean",
+      "description": "True when the result comes from a fallback that is not faithful to the CAD application (e.g. ezdxf drawing instead of a native plot, LibreDWG conversion)."
+    },
+    "summary": {
+      "type": "object",
+      "description": "A few command-specific numbers or flags the agent needs immediately (counts, page sizes, found/changed totals). No lists longer than ~20 items.",
+      "additionalProperties": true
+    },
+    "outputs": {
+      "type": "object",
+      "description": "Named artifacts written by the command.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["path"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "bytes": { "type": "integer", "minimum": 0 },
+          "mtime": { "type": "string", "format": "date-time" },
+          "source_mtime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "mtime of the source this artifact was produced from. Every artifact must be newer than or equal to it."
+          },
+          "sha1": { "type": "string" }
+        }
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-readable, deduplicated, at most ~20."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Stable machine code, e.g. NO_BACKEND, DOC_OPEN_BY_USER, COM_TRANSIENT, PRECONDITION_FAILED, DISK_LOW, TIMEOUT."
+          },
+          "message": { "type": "string" },
+          "hint": { "type": "string", "description": "What the agent or user can do next." }
+        }
+      }
+    },
+    "run_dir": { "type": "string", "description": "Fresh per-run directory holding outputs, status.json, progress.log." },
+    "log": { "type": "string", "description": "Full log file with details that did not fit here." },
+    "elapsed_s": { "type": "number", "minimum": 0 },
+    "next": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional suggested follow-up commands."
+    }
+  }
+}
