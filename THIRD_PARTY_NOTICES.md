@@ -44,7 +44,7 @@ These are third-party tools that must be installed separately on the operating s
 
 ## Trademark acknowledgements
 
-- **Autodesk, AutoCAD, DWG**: Registered trademarks of Autodesk, Inc. This project is not affiliated with Autodesk.
+- **Autodesk, AutoCAD, DWG**: trademarks of the Autodesk group of companies. This project is not affiliated with Autodesk and uses the names only to say which file formats and applications it works with.
 - **BricsCAD**: Trademark of Bricsys.
 - **ZWCAD**: Trademark of ZWSOFT.
 - **GstarCAD**: Trademark of GSTARSOFT.

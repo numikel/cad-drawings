@@ -1,0 +1,9 @@
+{
+  "name": "cad-drawings",
+  "displayName": "CAD Drawings",
+  "version": "0.1.0",
+  "description": "Let an AI agent inspect, search, compare, convert and render CAD drawings (DWG and DXF) safely on Windows, macOS and Linux.",
+  "author": { "name": "cad-drawings contributors" },
+  "license": "MIT",
+  "keywords": ["cad", "dxf", "dwg", "ezdxf", "drawings", "agent-skills"]
+}

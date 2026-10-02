@@ -1,0 +1,14 @@
+{
+  "name": "cad-drawings-skills",
+  "owner": { "name": "cad-drawings contributors" },
+  "description": "Agent skills for working with CAD drawings.",
+  "plugins": [
+    {
+      "name": "cad-drawings",
+      "source": "./",
+      "description": "Inspect, search, compare, convert and render DWG and DXF drawings.",
+      "category": "productivity",
+      "tags": ["cad", "dxf", "dwg"]
+    }
+  ]
+}
