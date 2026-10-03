@@ -914,11 +914,32 @@ def test_configure_plot_keeps_a_working_pdf_setup(clock: Clock) -> None:
     assert lay.set_calls == [] and warnings == [] and media == (420.0, 297.0)
 
 
-def test_configure_plot_replaces_a_non_pdf_device(clock: Clock) -> None:
+def test_configure_plot_keeps_a_non_pdf_device_and_names_pdf_only_for_the_plot_call(
+    clock: Clock,
+) -> None:
+    """Real case: assigning ConfigName reset the plot setup of a layout that used another device
+    (a 1-object PDF instead of 18 000); the PDF device is passed to PlotToFile instead."""
     lay = FakeLayout("Sheet-A", config="Some Printer")
     warnings: list[str] = []
-    make_session()._configure_plot(lay, {}, warnings)
-    assert lay.ConfigName == "DWG To PDF.pc3"
+    plan: dict[str, str] = {}
+    make_session()._configure_plot(lay, {}, warnings, plan)
+    assert lay.ConfigName == "Some Printer" and lay.refreshed == 0
+    assert plan == {"device": "DWG To PDF.pc3"}
+    assert any("Some Printer" in w for w in warnings)
+
+
+def test_configure_plot_assigns_the_pdf_device_only_to_a_layout_without_any(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A", config="None", size=(297, 210))
+    plan: dict[str, str] = {}
+    make_session()._configure_plot(lay, {}, [], plan)
+    assert lay.ConfigName == "DWG To PDF.pc3" and plan == {}
+
+
+def test_configure_plot_explicit_device_is_assigned_as_asked(clock: Clock) -> None:
+    lay = FakeLayout("Sheet-A", config="Some Printer")
+    plan: dict[str, str] = {}
+    make_session()._configure_plot(lay, {"device": "DWG To PDF.pc3"}, [], plan)
+    assert lay.ConfigName == "DWG To PDF.pc3" and plan == {}
 
 
 def test_configure_plot_explicit_page_setup(clock: Clock) -> None:
@@ -1745,3 +1766,24 @@ def test_fresh_layout_gives_up_when_even_the_fresh_proxy_fails() -> None:
     lay = acad._FreshLayout(_StaleLayout(), lambda: _StaleLayout())
     with pytest.raises(AttributeError):
         lay.RefreshPlotDeviceInfo()
+
+
+def test_plot_passes_the_pdf_device_to_plottofile_for_a_layout_with_another_device(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, str | None]] = []
+
+    def plot(path: str, device: str | None = None) -> bool:
+        calls.append((path, device))
+        Path(path).write_bytes(b"%PDF-1.7 fake")
+        return True
+
+    monkeypatch.setattr(acad, "_pdf_info", lambda p: (1, (420.0, 297.0)))
+    monkeypatch.setattr(acad, "_pdf_object_count", lambda p: 500)
+    lay = FakeLayout("Sheet-A", config="Some Printer")
+    lay.CanonicalMediaName = "ISO_A3_(420.00_x_297.00_MM)"
+    session, _app, _raw, drawing = plot_session(tmp_path, plot, lay)
+    dst = tmp_path / "out.pdf"
+    session.plot_layout_pdf(drawing, "sheet-a", dst)
+    assert calls == [(str(dst), "DWG To PDF.pc3")]
+    assert lay.ConfigName == "Some Printer"  # the layout's own setup is untouched

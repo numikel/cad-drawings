@@ -745,11 +745,15 @@ class Doc:
                 lay = _FreshLayout(lay, lambda: session._find_layout(self, layout)[0])
                 retry_expr(lambda: self.raw.Activate())
                 retry_expr(lambda: self.raw.SetVariable("CTAB", lay_name))
-                media = session._configure_plot(lay, page_setup or {}, warnings)
+                plan: dict[str, str] = {}
+                media = session._configure_plot(lay, page_setup or {}, warnings, plan)
                 with contextlib.suppress(Exception):
                     self.raw.Plot.QuietErrorMode = True
                 with session._deadline("PlotToFile"):
-                    ok = retry_expr(lambda: self.raw.Plot.PlotToFile(str(dst)))
+                    if plan.get("device"):
+                        ok = retry_expr(lambda: self.raw.Plot.PlotToFile(str(dst), plan["device"]))
+                    else:
+                        ok = retry_expr(lambda: self.raw.Plot.PlotToFile(str(dst)))
                 if not ok:
                     raise CadError(
                         "PLOT_FAILED",
@@ -1356,9 +1360,17 @@ class AcadSession:
         )
 
     def _configure_plot(
-        self, lay: Any, ps: dict[str, Any], warnings: list[str]
+        self,
+        lay: Any,
+        ps: dict[str, Any],
+        warnings: list[str],
+        plan: dict[str, str] | None = None,
     ) -> tuple[float, float] | None:
-        """Apply the page setup; returns the media size in mm when it is known."""
+        """Apply the page setup; returns the media size in mm when it is known.
+
+        ``plan`` (optional) receives ``{"device": <pdf device>}`` when the layout keeps its own
+        plotter and the PDF device must be named only in the ``PlotToFile`` call.
+        """
         width, height = retry_expr(lambda: lay.GetPaperSize())
         units = _PAPER_UNITS_TO_MM.get(retry_expr(lambda: lay.PaperUnits))
         size_mm = (width * units, height * units) if units and width and height else None
@@ -1379,6 +1391,24 @@ class AcadSession:
                 )
         elif current in devices and "pdf" in current.lower():
             device = current
+        elif plan is not None and current in devices and current.lower() != "none":
+            # The layout uses another real device (DWF, a printer). Assigning ConfigName would
+            # reset its plot setup (area, origin, scale): on a real drawing the PDF came out with
+            # 1 object instead of 18 000. Keep the layout as it is and name the PDF device only
+            # in the PlotToFile call.
+            if PDF_DEVICE not in devices:
+                raise CadError(
+                    "PRECONDITION_FAILED",
+                    f"{PDF_DEVICE} is not available in this CAD installation",
+                    exit_code=ExitCode.PRECONDITION_FAILED,
+                    hint="pass page_setup with a PDF device from: " + ", ".join(devices[:10]),
+                )
+            device = current
+            plan["device"] = PDF_DEVICE
+            warnings.append(
+                f"layout uses {current}; the PDF is written through {PDF_DEVICE} with the "
+                "layout's own page setup"
+            )
         else:
             if PDF_DEVICE not in devices:
                 raise CadError(
