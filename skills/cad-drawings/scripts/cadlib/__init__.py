@@ -2,7 +2,18 @@
 
 # Modules that may define COMMANDS (see command.py). Missing modules are skipped, so tracks can
 # land independently. Order = order in `--help`. Helper modules are NOT listed here.
-MODULES = ("doctor", "dxf", "convert", "render", "cleanup", "edit", "plot", "qa", "measure")
+MODULES = (
+    "doctor",
+    "dxf",
+    "convert",
+    "render",
+    "cleanup",
+    "edit",
+    "plot",
+    "qa",
+    "measure",
+    "register",
+)
 
 # Which module provides which command. Used only to build "missing dependency" stand-ins when a
 # module cannot be imported (e.g. ezdxf is not installed), so the other commands keep working.
@@ -20,6 +31,7 @@ COMMAND_MODULES = {
     "plot": "plot",
     "qa": "qa",
     "measure": "measure",
+    "register": "register",
 }
 
 __version__ = "0.1.0"

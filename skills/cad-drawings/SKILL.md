@@ -76,6 +76,7 @@ Run `python scripts/cad.py --help` for the full list. Each command can be called
 - `edit` — Apply a plan of edits to a DXF or DWG (two-pass validation, verified against the original)
 - `plot` — Deliverable PDFs per layout, plotted by the CAD application (`--allow-com` required)
 - `measure` — Lengths and areas of selected entities in a chosen unit, from `$INSUNITS`; hatch minus islands; no total across entity types
+- `register` — Transform (shift, scale, rotation) between two drawings from control points, with residuals and independent check points; does not open any drawing
 - `qa` — Mechanical checks with severity on a drawing (units, empty layouts, viewport scale, missing xrefs) and on a plotted PDF (page count and size, empty content, required or forbidden text); exit 7 only for errors
 - `cleanup` — List and delete run directories and cache, with dry-run preview
 
@@ -145,6 +146,21 @@ python scripts/cad.py measure <file> --layer <layer> --type HATCH --unit m
 - Block references, text, dimensions and other types are counted under `skipped`, not measured. Measure inside the block definition (`--space <block>`) when you need it.
 - Per-entity values are in `measurements.json`; the summary has the unit, count, per-type and per-layer totals.
 - Never read dimensions off a rendered PNG.
+
+### Align two drawings
+
+When drawings from different sources must be combined or compared (an underlay, a survey, a scan of the same plan), find the transform from control points that appear in both. Read the coordinates of the same feature in each drawing with `find` or `dump`, then:
+
+```
+python scripts/cad.py register --pair "x,y:X,Y" --pair "x,y:X,Y" --pair "x,y:X,Y" --check "x,y:X,Y" [--model similarity|scale-translation|translation] [--tolerance 5] [--apply "x,y"]
+```
+
+- Each `--pair` is a point in drawing A and the same point in drawing B. A similarity (default) needs two points and fits scale, rotation and shift; `scale-translation` fixes the rotation at zero; `translation` needs one point and keeps the scale at 1.
+- With exactly the minimum number of points the fit is exact: the residuals are zero and prove nothing. Give at least one more point with `--check`; it is not used in the fit and shows whether the transform holds elsewhere. Choose it far from the others.
+- The result has the scale, rotation (degrees), shift, the matrix, and the residual of every control and check point, in drawing B units. With `--tolerance` a larger residual ends the run with exit 7.
+- A scale close to a unit ratio (1000, 25.4, ...) is flagged: it usually means the drawings have different units, not that one is drawn at a different scale. Check `$INSUNITS` before accepting it.
+- A mirrored drawing is flagged but not fitted. Do not take geometry from an unscaled PDF or an image; use control points in model coordinates.
+- `--apply "x,y"` maps further points of drawing A into drawing B. The command does not open or change any drawing.
 
 ### Edit a drawing
 

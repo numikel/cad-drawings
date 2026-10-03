@@ -88,6 +88,10 @@ Helper: `load_dxf(path: Path, ctx) -> ezdxf.document.Drawing` (DWG input is conv
 - Geometry from `ezdxf.path` (Bezier segments 16, flattening 1e-6 of the entity size), hatches from `path.from_hatch` with even-odd islands.
 - Writes `measurements.json`; a filter is required; `NO_UNITS` (exit 6) when `$INSUNITS` is 0 and no `--assume-unit`.
 
+`register --pair x,y:X,Y ... [--check x,y:X,Y ...] [--apply x,y ...] [--model similarity|scale-translation|translation] [--tolerance T]`
+- Module `cadlib.register`: `fit(src, dst, model)` returns `Fit(scale, rotation_deg, tx, ty, residuals, rms, max_residual, mirror_better)`; `apply(fit, points)`; `scale_hint(scale)`.
+- Least squares with complex numbers (no linear-algebra package). Writes `registration.json` (matrix, residuals, check, applied). `REGISTRATION_POOR` (exit 7) only when `--tolerance` is given and a residual exceeds it.
+
 `qa [FILE] [--pdf PDF] [--layout NAME | --size WxH] [--pages N] [--require TEXT ...] [--forbid TEXT ...]`
 - Module `cadlib.qa`: `check_drawing(doc, info)` and `check_pdf(path, expected_mm=, expect_pages=, require=, forbid=)` return `Finding(id, severity, where, message)`; severities are error, warning, info.
 - Writes `findings.json`; the summary has counts and the first five findings. Errors give exit 7 with `QA_FAILED`; warnings and info give exit 0.

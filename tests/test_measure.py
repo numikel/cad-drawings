@@ -261,3 +261,57 @@ def test_the_summary_stays_small_for_many_entities(tmp_path: Path, runs: Path) -
     result = run_measure([str(save(doc, tmp_path)), "--type", "LINE"], runs)
     assert len(json.dumps(result.summary)) < 2500
     assert len(entities(result)) == 300
+
+
+# --------------------------------------------------------------------------------------
+# far from the origin (survey coordinates)
+# --------------------------------------------------------------------------------------
+
+
+def test_area_survives_coordinates_far_from_the_origin() -> None:
+    """A real drawing had circles near x = 5e8, y = 1.5e9: the shoelace sum on absolute
+    coordinates lost every digit of a small circle's area."""
+    msp = new_doc().modelspace()
+    far = (523_030_190.186, 1_558_582_582.901)
+    m = measure.measure_entity(msp.add_circle(far, 8.0))
+    assert m is not None
+    assert m.area == pytest.approx(math.pi * 64, rel=1e-5)
+    square = measure.measure_entity(
+        msp.add_lwpolyline(
+            [
+                (far[0], far[1]),
+                (far[0] + 3, far[1]),
+                (far[0] + 3, far[1] + 2),
+                (far[0], far[1] + 2),
+            ],
+            close=True,
+        )
+    )
+    assert square is not None and square.area == pytest.approx(6.0, rel=1e-9)
+
+
+def test_hatch_area_survives_coordinates_far_from_the_origin() -> None:
+    hatch = new_doc().modelspace().add_hatch()
+    ox, oy = 523_030_190.0, 1_558_582_582.0
+    hatch.paths.add_polyline_path(
+        [(ox, oy), (ox + 10, oy), (ox + 10, oy + 10), (ox, oy + 10)], is_closed=True, flags=1
+    )
+    hatch.paths.add_polyline_path(
+        [(ox + 3, oy + 3), (ox + 7, oy + 3), (ox + 7, oy + 7), (ox + 3, oy + 7)],
+        is_closed=True,
+        flags=16,
+    )
+    m = measure.measure_entity(hatch)
+    assert m is not None and m.area == pytest.approx(84.0, rel=1e-9)
+
+
+def test_small_values_keep_their_significant_digits(tmp_path: Path, runs: Path) -> None:
+    """Rounding every entity to 6 decimals of the result unit cost ~1e-4 on a millimetre
+    drawing full of tiny arcs measured in metres."""
+    doc = new_doc(4)
+    msp = doc.modelspace()
+    for i in range(200):
+        msp.add_line((0, i), (0.1234567, i))  # 0.1234567 mm each
+    result = run_measure([str(save(doc, tmp_path)), "--type", "LINE", "--unit", "m"], runs)
+    assert result.summary["length"] == pytest.approx(200 * 0.1234567e-3, rel=1e-6)
+    assert entities(result)[0]["length"] == pytest.approx(0.1234567e-3, rel=1e-6)

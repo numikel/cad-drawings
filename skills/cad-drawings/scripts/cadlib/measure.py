@@ -24,7 +24,7 @@ from .command import Command
 from .dxf import _open, _overlaps, _space_matches
 from .entities import describe, iter_locations
 from .result import CadError, Result
-from .util import Deadline, _add_common, _finish, _jsonable, _new_run, _write_json, parse_floats
+from .util import Deadline, _add_common, _finish, _new_run, _write_json, parse_floats
 
 UNIT_CODES = {"in": 1, "ft": 2, "mm": 4, "cm": 5, "m": 6, "km": 7}
 PAPER_UNITS = {0: 1, 1: 4}  # DXF plot_paper_units: 0 = inches, 1 = millimetres
@@ -61,6 +61,16 @@ def unit_factor(insunits: int, name: str) -> float:
     return float(ezunits.conversion_factor(insunits, code))
 
 
+def _area(vertices: list[Any]) -> float:
+    """Polygon area, computed relative to the first vertex.
+
+    Survey drawings sit at coordinates around 1e9; the shoelace sum on those absolute values
+    cancels away every digit of a small area, so the polygon is moved to the origin first.
+    """
+    origin = vertices[0]
+    return abs(polygon_area([v - origin for v in vertices]))
+
+
 def _polyline_length(vertices: list[Any], closed: bool) -> float:
     if closed and len(vertices) > 1 and (vertices[0] - vertices[-1]).magnitude > 1e-12:
         vertices = [*vertices, vertices[0]]
@@ -89,7 +99,7 @@ def _hatch(entity: Any) -> Measure | None:
             for j, other in enumerate(polygons)
             if j != i and is_point_in_polygon_2d(Vec2(poly[0]), [Vec2(v) for v in other]) >= 0
         )
-        size = abs(polygon_area(poly))
+        size = _area(poly)
         if depth % 2:
             area -= size
             islands += 1
@@ -123,7 +133,7 @@ def measure_entity(entity: Any) -> Measure | None:
         is_closed = bool(part.is_closed)
         length += _polyline_length(vertices, is_closed)
         if is_closed and len(vertices) >= 3:
-            area += abs(polygon_area(vertices))
+            area += _area(vertices)
         else:
             closed = False
     note = ""
@@ -136,6 +146,15 @@ def measure_entity(entity: Any) -> Measure | None:
 # --------------------------------------------------------------------------------------
 # command
 # --------------------------------------------------------------------------------------
+
+
+def _sig(value: float) -> float:
+    """Nine significant digits: a fixed number of decimals ruins small values in a big unit."""
+    return float(f"{value:.9g}")
+
+
+def _rounded(record: dict[str, Any]) -> dict[str, Any]:
+    return {k: (_sig(v) if isinstance(v, float) else v) for k, v in record.items()}
 
 
 def _drawing_unit_name(insunits: int) -> str:
@@ -221,13 +240,14 @@ def _run_measure(args: argparse.Namespace) -> Result:
                 "layer": e.dxf.layer,
                 "space": loc.layout or loc.block or "model",
                 "closed": m.closed,
-                "length": None if m.length is None else round(m.length * k, 6),
-                "area": None if m.area is None else round(m.area * k * k, 6),
+                "length": None if m.length is None else m.length * k,
+                "area": None if m.area is None else m.area * k * k,
                 "note": m.note,
             }
         )
     path = ctx.path("measurements.json")
-    _write_json(path, _jsonable({"unit": args.unit, "entities": records}))
+    # plain JSON types, no _jsonable: it rounds floats to 4 decimals (made for coordinates)
+    _write_json(path, {"unit": args.unit, "entities": [_rounded(r) for r in records]})
     ctx.add_output(result, "measurements", path, source=loaded.source)
 
     by_type: dict[str, dict[str, Any]] = defaultdict(
@@ -249,9 +269,9 @@ def _run_measure(args: argparse.Namespace) -> Result:
         lay["area"] += r["area"] or 0.0
     type_summary = {}
     for name, t in by_type.items():
-        entry: dict[str, Any] = {"count": t["count"], "length": round(t["length"], 6)}
+        entry: dict[str, Any] = {"count": t["count"], "length": _sig(t["length"])}
         if t["_area_n"]:
-            entry["area"] = round(t["area"], 6)
+            entry["area"] = _sig(t["area"])
         type_summary[name] = entry
     layer_rank = sorted(by_layer.items(), key=lambda kv: -kv[1]["count"])
     result.summary = {
@@ -265,8 +285,8 @@ def _run_measure(args: argparse.Namespace) -> Result:
         "by_layer": {
             name: {
                 "count": v["count"],
-                "length": round(v["length"], 6),
-                "area": round(v["area"], 6),
+                "length": _sig(v["length"]),
+                "area": _sig(v["area"]),
             }
             for name, v in layer_rank[:BY_LAYER_LIMIT]
         },
