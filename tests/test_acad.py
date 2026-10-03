@@ -1704,3 +1704,44 @@ def test_quit_does_not_sweep_documents_of_a_user_session(
     session = make_session(app, owned=False)
     session.quit()
     assert not users.closed
+
+
+# --- layout proxies that lose members ("Item.RefreshPlotDeviceInfo") ---------------------------------
+
+
+class _StaleLayout:
+    """A late-bound proxy whose members vanished (real case on a sheet-set drawing)."""
+
+    def __getattr__(self, name: str) -> Any:
+        raise AttributeError(f"Item.{name}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"Item.{name}")
+
+
+def test_fresh_layout_refetches_when_the_proxy_loses_a_method() -> None:
+    good = FakeLayout("Sheet-A", config="DWG To PDF.pc3")
+    fetches: list[int] = []
+
+    def fetch() -> Any:
+        fetches.append(1)
+        return good
+
+    lay = acad._FreshLayout(_StaleLayout(), fetch)
+    lay.RefreshPlotDeviceInfo()
+    assert good.refreshed == 1 and len(fetches) == 1
+    lay.RefreshPlotDeviceInfo()
+    assert good.refreshed == 2 and len(fetches) == 1  # the fresh proxy is kept
+
+
+def test_fresh_layout_refetches_on_assignment_too() -> None:
+    good = FakeLayout("Sheet-A")
+    lay = acad._FreshLayout(_StaleLayout(), lambda: good)
+    lay.ConfigName = "DWG To PDF.pc3"
+    assert good.ConfigName == "DWG To PDF.pc3"
+
+
+def test_fresh_layout_gives_up_when_even_the_fresh_proxy_fails() -> None:
+    lay = acad._FreshLayout(_StaleLayout(), lambda: _StaleLayout())
+    with pytest.raises(AttributeError):
+        lay.RefreshPlotDeviceInfo()

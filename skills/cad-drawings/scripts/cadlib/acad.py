@@ -598,6 +598,32 @@ def _pdf_object_count(path: Path) -> int | None:
         pdf.close()
 
 
+class _FreshLayout:
+    """A layout proxy that re-fetches itself when late binding loses a member.
+
+    On some drawings the object returned by ``Layouts.Item`` stops answering (``Item.<member>``
+    AttributeError). Asking the application for the layout again gives a working proxy.
+    """
+
+    def __init__(self, layout: Any, fetch: Callable[[], Any]) -> None:
+        object.__setattr__(self, "_layout", layout)
+        object.__setattr__(self, "_fetch", fetch)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return getattr(self._layout, name)
+        except AttributeError:
+            object.__setattr__(self, "_layout", self._fetch())
+            return getattr(self._layout, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        try:
+            setattr(self._layout, name, value)
+        except AttributeError:
+            object.__setattr__(self, "_layout", self._fetch())
+            setattr(self._layout, name, value)
+
+
 def _double_array(values: tuple[float, ...]) -> Any:
     com = _com()
     return com.client.VARIANT(com.pythoncom.VT_ARRAY | com.pythoncom.VT_R8, list(values))
@@ -716,6 +742,7 @@ class Doc:
         try:
             with session.sysvars(self, BACKGROUNDPLOT=0, ISAVEBAK=0, ISAVEPERCENT=0):
                 lay, lay_name = session._find_layout(self, layout)
+                lay = _FreshLayout(lay, lambda: session._find_layout(self, layout)[0])
                 retry_expr(lambda: self.raw.Activate())
                 retry_expr(lambda: self.raw.SetVariable("CTAB", lay_name))
                 media = session._configure_plot(lay, page_setup or {}, warnings)
@@ -1442,8 +1469,9 @@ class AcadSession:
             raise CadError(
                 "PLOT_BAD_OUTPUT",
                 f"the PDF has almost no drawing content ({objects} objects on the page)",
-                hint="the layout's plot setup was probably reset or its viewports did not "
-                "regenerate; compare with `render --backend ezdxf` and check the page setup",
+                hint="the layout may simply be empty (check with `dump --space <layout>`); "
+                "otherwise its plot setup was reset or its viewports did not regenerate: compare "
+                "with `render --backend ezdxf` and check the page setup",
             )
         if media is None:
             return ["PDF page size was not compared with the media (media size unknown)"]
