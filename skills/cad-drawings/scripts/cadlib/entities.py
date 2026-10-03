@@ -104,6 +104,22 @@ def entity_text(entity: Any) -> tuple[str | None, str | None]:
     return None, None
 
 
+def has_field(entity: Any) -> bool:
+    """True when CAD evaluates a field in the entity (extension dictionary key ACAD_FIELD).
+
+    An INSERT counts when one of its attributes carries a field. Never raises: an unreadable
+    dictionary simply means "no field".
+    """
+    try:
+        if entity.has_extension_dict and "ACAD_FIELD" in entity.get_extension_dict():
+            return True
+        if entity.dxftype() == "INSERT":
+            return any(has_field(attrib) for attrib in entity.attribs)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    return False
+
+
 def _style(entity: Any) -> dict[str, Any]:
     d = entity.dxf
     return {

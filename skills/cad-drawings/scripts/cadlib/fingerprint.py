@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from .runs import RunContext
 from .drawing import Loaded, _resolve_source, open_drawing
 from .drawing_info import _header_units
-from .entities import entity_text, geometry, iter_locations
+from .entities import entity_text, geometry, has_field, iter_locations
 from .printing import DocModel
 from .util import _LAYOUT_BLOCKS, Deadline, _hash, _pt, r4
 from .viewports import _viewport_info
@@ -55,6 +55,8 @@ def build_fingerprint(loaded: Loaded, ctx: RunContext, deadline: Deadline) -> di
             "shape": shape,
             "sig": _hash([shape, anchor]),
         }
+        if has_field(e):
+            _abs["field"] = True  # evaluated text: CAD may rewrite it on any save
         if kind == "VIEWPORT":
             rec["vp_id"] = _viewport_info(e).vp_id
         entities.append(rec)

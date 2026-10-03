@@ -467,6 +467,30 @@ def _compact(change: dict[str, Any]) -> dict[str, Any]:
     return {k: change[k] for k in keys if k in change}
 
 
+_FIELD_TEXT = ("text", "attribs")
+_FIELD_SIDE_EFFECTS = ("anchor", "bbox")
+
+
+def _field_update(change: dict[str, Any]) -> dict[str, Any] | None:
+    """The report record when ``change`` is only CAD re-evaluating a field, else ``None``.
+
+    Text of a field entity differs and nothing else but the geometry that follows from new text.
+    """
+    if change["kind"] != "changed" or not change.get("field"):
+        return None
+    fields = {c["field"]: c for c in change["changes"]}
+    shown = next((fields[k] for k in _FIELD_TEXT if k in fields), None)
+    if shown is None or not set(fields) <= {*_FIELD_TEXT, *_FIELD_SIDE_EFFECTS}:
+        return None
+    return {
+        "handle": change["handle"],
+        "scope": change["scope"],
+        "layer": change["layer"],
+        "old": shown["old"],
+        "new": shown["new"],
+    }
+
+
 def _verify(
     base: Loaded,
     edited: Loaded,
@@ -523,6 +547,12 @@ def _verify(
             leftover.remove(twin)
         else:
             leftover.append(removal)
+    field_updates: list[dict[str, Any]] = []
+    for change in list(leftover):
+        update = _field_update(change)
+        if update is not None:
+            field_updates.append(update)
+            leftover.remove(change)
     unintended = [_compact(c) for c in leftover]
     unintended += [{**s, "kind": f"structural {s['kind']}"} for s in diff["structural"]]
     unobserved = [i for slot in expected.values() if not slot["matched"] for i in slot["ids"]]
@@ -531,6 +561,7 @@ def _verify(
         "counts": diff["counts"],
         "noise": diff["noise"],
         "unintended": unintended,
+        "field_updates": field_updates,
         "unobserved": unobserved,
         "not_as_planned": not_as_planned,
         "verified": not unintended and not not_as_planned,
@@ -812,6 +843,13 @@ def _finish(
     clones = {o.id: o.new_handle for o in outcomes if o.new_handle}
     if clones:
         summary["new_handles"] = dict(list(clones.items())[:10])
+    fields = len(verification["field_updates"])
+    if fields:
+        summary["field_updates"] = fields
+        result.warn(
+            f"{fields} field(s) were refreshed by the CAD application when saving "
+            "(for example FILENAME); not caused by the plan"
+        )
     result.summary = summary
     if verification["unobserved"]:
         result.warn(

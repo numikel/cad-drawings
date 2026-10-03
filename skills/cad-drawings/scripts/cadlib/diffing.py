@@ -33,9 +33,17 @@ def _scope_names(fp: dict[str, Any]) -> dict[str, str]:
 def _prop_changes(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
     out = []
     for key in sorted(set(old) | set(new)):
-        if old.get(key) != new.get(key):
+        if key != "field" and old.get(key) != new.get(key):  # "field" is a marker, not a change
             out.append({"field": key, "old": _brief(old.get(key)), "new": _brief(new.get(key))})
     return out
+
+
+def _changed(ea: dict[str, Any], eb: dict[str, Any], diffs: list[dict[str, Any]]) -> dict[str, Any]:
+    """A ``changed`` record; ``field`` marks entities that carry a CAD field in either version."""
+    rec = {"kind": "changed", **_ref(ea), "handle_b": eb["handle"], "changes": diffs}
+    if ea["props"].get("field") or eb["props"].get("field"):
+        rec["field"] = True
+    return rec
 
 
 def _pair_nearest(
@@ -231,9 +239,7 @@ def diff_fingerprints(
                     diffs = _prop_changes(ea["props"], eb["props"])
                     if ea["layer"] != eb["layer"]:
                         diffs.insert(0, {"field": "layer", "old": ea["layer"], "new": eb["layer"]})
-                    changes.append(
-                        {"kind": "changed", **_ref(ea), "handle_b": eb["handle"], "changes": diffs}
-                    )
+                    changes.append(_changed(ea, eb, diffs))
                 else:
                     next_a.append(ea)
             still_a = next_a
@@ -248,9 +254,7 @@ def diff_fingerprints(
                 diffs.append({"field": "anchor", "old": ea["anchor"], "new": eb["anchor"]})
             if ea.get("bbox") != eb.get("bbox"):
                 diffs.append({"field": "bbox", "old": ea.get("bbox"), "new": eb.get("bbox")})
-            changes.append(
-                {"kind": "changed", **_ref(ea), "handle_b": eb["handle"], "changes": diffs}
-            )
+            changes.append(_changed(ea, eb, diffs))
         for ea in still_a:
             changes.append({"kind": "removed", **_ref(ea), "to_confirm": True})
         for eb in rest_b:
