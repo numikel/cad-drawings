@@ -7,6 +7,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-03
+
+Three commands that work on coordinates and findings. `measure` and `qa` were checked on real drawings from a CAD installation; see [docs/measurements.md](docs/measurements.md).
+
+### Added
+
+- **`qa`:** findings with severity (error, warning, info) on a drawing (unset units, layouts holding only viewports, viewports without a usable scale, missing external references) and on a plotted PDF (page count and size, almost no content, required or forbidden text); exit 7 only for errors.
+- **`measure`:** lengths and areas of selected entities (LINE, ARC, CIRCLE, ELLIPSE, SPLINE, polylines, hatches) in a chosen unit taken from `$INSUNITS`; hatch area is the outline minus its islands; no total across entity types; unitless drawings are refused unless `--assume-unit` is given.
+- **`register`:** the transform between two drawings (shift, scale, rotation) from control points given as coordinates, with residuals, independent check points, a warning when the fit is exact (it proves nothing), a unit-ratio hint and a mirror warning; exit 7 only with `--tolerance`.
+
 ## [0.1.0] - 2026-10-03
 
 First public version. Measured baseline and method: [docs/measurements.md](docs/measurements.md).
@@ -17,9 +27,6 @@ First public version. Measured baseline and method: [docs/measurements.md](docs/
 - **`edit`:** executes an edit plan in two passes (validate everything first, then apply) on DXF through ezdxf and on DWG through the user's CAD; six operations (`replace-text`, `set-props`, `delete`, `move`, `clone`, `pan-viewport`); idempotent; checks its own result against the original and reports unintended changes; never touches the original.
 - **`plot` with layouts on another device:** a layout that uses a DWF plotter or a printer keeps its own plot setup; the PDF device is named only in the plot call. A PDF with almost no drawing content fails with `PLOT_BAD_OUTPUT` instead of being reported as success.
 - **`edit` and fields:** fields that CAD re-evaluates on save (for example `FILENAME`) are listed as `field_updates` and no longer make verification fail with exit 7.
-- **`register`:** the transform between two drawings (shift, scale, rotation) from control points given as coordinates, with residuals, independent check points, a warning when the fit is exact (it proves nothing), a unit-ratio hint and a mirror warning; exit 7 only with `--tolerance`.
-- **`measure`:** lengths and areas of selected entities (LINE, ARC, CIRCLE, ELLIPSE, SPLINE, polylines, hatches) in a chosen unit taken from `$INSUNITS`; hatch area is the outline minus its islands; no total across entity types; unitless drawings are refused unless `--assume-unit` is given.
-- **`qa`:** findings with severity (error, warning, info) on a drawing (unset units, layouts holding only viewports, viewports without a usable scale, missing external references) and on a plotted PDF (page count and size, almost no content, required or forbidden text); exit 7 only for errors.
 - **References:** `references/plotting.md`, `references/edit-plans.md`.
 - **Read-side commands** (`python scripts/cad.py <command>`): `doctor`, `info`, `find`, `dump`, `fingerprint`, `diff`, `render`, `convert`, `cleanup`. Every command prints one short JSON summary (under about 4 KB) validated against `assets/output.schema.json`; large results go to files in a fresh run directory.
 - **Reading:** DXF through ezdxf; DWG through a converter (ODA File Converter, LibreDWG) or, only with `--allow-com`, the user's own CAD application on Windows.

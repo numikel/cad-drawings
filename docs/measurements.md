@@ -87,6 +87,19 @@ Result: 10 of 10 positive requests chose this skill and 10 of 10 negative ones d
 
 Limits of this check: the competing skills were few and clearly different, only two negatives (IFC to glTF, PDF) sit close to the topic, and a real assistant sees many more skills. It shows that the description is unambiguous about what it covers and excludes; it does not show how it ranks against a large catalogue. Requests that mix CAD with something else (for example a spreadsheet of block counts) were not tried.
 
+## Third check: `measure`, `qa` and `register` (2026-10-03)
+
+`qa` ran on ten sample drawings from a CAD installation and `measure` on those with real geometry, against independent numbers computed straight from the DXF (exact formulas, not the library's paths). Two defects that no synthetic drawing could show were found and fixed:
+
+| Found | Cause | Fix |
+|---|---|---|
+| The area of every one of 155 circles was off (up to 9.8 times for the smallest) while their lengths were right | The drawing sits near x = 5e8, y = 1.5e9 (survey coordinates); the shoelace sum on absolute coordinates cancels every digit of a small area | The polygon is moved to its first vertex before the area is computed |
+| Total length of 124 short arcs in a millimetre drawing was off by 7e-5 in metres | Every value was rounded to six decimals of the result unit | Nine significant digits; totals are summed from unrounded values |
+
+After the fixes: circle area 2e-6 relative error, circle length 3e-7, 2 649 lines 1e-6, 669 arcs 4e-7. Three plotted layouts passed `qa` (page size, page count, content) with no findings; a fourth, a layout holding a single viewport, is refused by the plot guard as before.
+
+Limits of this check: in most of the sample sheets model space holds only block insertions, so only two drawings gave measurable data; ellipses, hatches and polylines with arcs were measured but not compared with an independent number; one `qa` run ended once with an unexpected error after a correct conversion and did not recur, so its cause is unknown; `register` is arithmetic on supplied coordinates and is covered by unit tests only, not by a real survey or underlay.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
