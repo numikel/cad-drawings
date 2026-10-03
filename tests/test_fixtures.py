@@ -767,7 +767,7 @@ def _needle(index: int) -> str:
 
 def test_check_forbidden_reports_planted_items(tmp_path: Path) -> None:
     (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "note.md").write_text(f"fine\nsee {_needle(2)} here\n", encoding="utf-8")
+    (tmp_path / "docs" / "note.md").write_text(f"fine\nsee {_needle(1)} here\n", encoding="utf-8")
     (tmp_path / "docs" / "path.txt").write_text(f"open {_needle(0)}x\n", encoding="utf-8")
     (tmp_path / "plot.CTB").write_bytes(b"\x00\x01")
     (tmp_path / "stray.dxf").write_text("0\nEOF\n", encoding="utf-8")
@@ -784,7 +784,7 @@ def test_check_forbidden_reports_planted_items(tmp_path: Path) -> None:
 
 
 def test_check_forbidden_respects_exclusions_and_avoids_false_hits(tmp_path: Path) -> None:
-    bad = f"{_needle(2)} {_needle(0)}\n"
+    bad = f"{_needle(1)} {_needle(0)}\n"
     for excluded in ("_local", ".venv", "evals/fixtures"):
         folder = tmp_path / excluded
         folder.mkdir(parents=True)

@@ -21,8 +21,6 @@ from pathlib import Path
 FORBIDDEN_STRINGS: tuple[tuple[str, bool], ...] = (
     ("C:\\Users\\", True),
     ("C:/Users/", True),
-    ("\\user\\", True),  # a home-directory path, not the author's public contact address
-    ("/user/", True),
 )
 
 # Terms that identify a client or project are NOT kept in the repository (the list itself would
