@@ -7,7 +7,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-First public version (0.1.0 once released). Measured baseline and method: [docs/measurements.md](docs/measurements.md).
+## [0.1.0] - 2026-10-03
+
+First public version. Measured baseline and method: [docs/measurements.md](docs/measurements.md).
 
 ### Added
 
