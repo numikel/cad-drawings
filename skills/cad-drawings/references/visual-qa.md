@@ -10,6 +10,20 @@ Before visual inspection, have these ready:
 - **A reference print** (one known-good PDF if this is a replot)
 - **Measurement tool**: DPI setting, scale bar, or a known dimension to verify scale
 
+## Mechanical checks first
+
+Run `qa` before looking at pixels: it decides what a script can decide and leaves the rest to you.
+
+```
+python scripts/cad.py qa plan.dxf --pdf sheet.pdf --layout "Sheet-A" --require "Rev. C" --forbid DRAFT
+```
+
+- On the drawing: unset `$INSUNITS`, a layout that holds only viewports, a viewport without a usable scale, an external reference that is missing on disk.
+- On the PDF: it opens, page count, page size against the layout's paper size (either orientation, small tolerance), almost no content on the page, text that must or must not appear.
+- Findings have a severity. Only errors end the run with exit 7; warnings and info do not, so read `findings.json` either way.
+- Required and forbidden text is searched in the PDF's text layer. Text drawn with SHX fonts, or plotted as geometry, is not text there; `qa` then reports that it could not check, it does not report the text as missing.
+- A clean `qa` says nothing about collisions, cut-off frames, or whether the right content is on the sheet. Those stay with the checklist below.
+
 ## Viewing and scaling
 
 ### Thumbnails and shrinking

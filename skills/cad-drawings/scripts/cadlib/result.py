@@ -79,6 +79,7 @@ ERROR_CODES: dict[str, ExitCode] = {
     "PID_UNAVAILABLE": ExitCode.ERROR,
     "PLOT_BAD_OUTPUT": ExitCode.ERROR,
     "PLOT_FAILED": ExitCode.ERROR,
+    "QA_FAILED": ExitCode.PARTIAL,
     "RUN_DIR": ExitCode.ERROR,
     "RUNS_DIR_UNSAFE": ExitCode.ERROR,
     "STALE_OUTPUT": ExitCode.ERROR,

@@ -75,6 +75,7 @@ Run `python scripts/cad.py --help` for the full list. Each command can be called
 - `convert` — DWG ↔ DXF (`--to dxf|dwg`, `--out`, `--overwrite`, `--dry-run`)
 - `edit` — Apply a plan of edits to a DXF or DWG (two-pass validation, verified against the original)
 - `plot` — Deliverable PDFs per layout, plotted by the CAD application (`--allow-com` required)
+- `qa` — Mechanical checks with severity on a drawing (units, empty layouts, viewport scale, missing xrefs) and on a plotted PDF (page count and size, empty content, required or forbidden text); exit 7 only for errors
 - `cleanup` — List and delete run directories and cache, with dry-run preview
 
 All commands write to a fresh run directory (never next to the source). Large results go to files; the JSON summary stays under ~4 KB. Commands that can read a DWG accept `--allow-com` (the user agreed to start their CAD application) and `--backend auto|com|oda|libredwg`; `render` uses `--backend auto|com|ezdxf` for the render engine. Failed commands still report `run_dir` and `log`.
