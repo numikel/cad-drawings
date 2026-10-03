@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Agent Skill](https://img.shields.io/badge/agent%20skill-agentskills.io-informational.svg)](https://agentskills.io/specification)
-<!-- Add after the first `npx skills add` lists the skill: skills.sh badge (https://skills.sh/b/numikel/cad-drawings) -->
+[![skills.sh](https://skills.sh/b/numikel/cad-drawings)](https://skills.sh/numikel/cad-drawings)
 
 ```bash
 npx skills add numikel/cad-drawings
