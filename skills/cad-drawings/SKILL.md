@@ -75,6 +75,7 @@ Run `python scripts/cad.py --help` for the full list. Each command can be called
 - `convert` — DWG ↔ DXF (`--to dxf|dwg`, `--out`, `--overwrite`, `--dry-run`)
 - `edit` — Apply a plan of edits to a DXF or DWG (two-pass validation, verified against the original)
 - `plot` — Deliverable PDFs per layout, plotted by the CAD application (`--allow-com` required)
+- `measure` — Lengths and areas of selected entities in a chosen unit, from `$INSUNITS`; hatch minus islands; no total across entity types
 - `qa` — Mechanical checks with severity on a drawing (units, empty layouts, viewport scale, missing xrefs) and on a plotted PDF (page count and size, empty content, required or forbidden text); exit 7 only for errors
 - `cleanup` — List and delete run directories and cache, with dry-run preview
 
@@ -130,17 +131,20 @@ PNG in a fresh run directory. The agent controls nothing about colors, layers or
 
 ### Measure areas and lengths
 
-```
-python scripts/cad.py info <file>
-```
-
-Check `$INSUNITS` to learn the model unit (e.g., 4 = mm, 6 = m).
+Narrow the selection first (`dump` shows what is on a layer), then measure one entity type:
 
 ```
-python scripts/cad.py dump <file> --space model --type HATCH --type LWPOLYLINE --layer <layer> [--window X1,Y1,X2,Y2]
+python scripts/cad.py measure <file> --layer <layer> --type HATCH --unit m
 ```
 
-Export the boundary or hatch entity. Parse the result with ezdxf: compute area or length in model units, convert to the requested unit, state which entity the number came from. When the hatch has islands the area of the boundary differs from the hatch area; always report which one and why. Ignore closed shapes that are not filled or dimensioned (they may be guides or orphaned geometry). For closed polylines compute the area with `ezdxf.math.area(vertices)` (ezdxf is already installed); never read dimensions off a rendered PNG.
+- Units come from `$INSUNITS`. A drawing without a unit is refused (`NO_UNITS`): ask the user which unit it is, then pass `--assume-unit mm|cm|m|in|ft`. The result says that the unit was assumed.
+- Results are in the unit asked for (`--unit`, default `m`; areas in its square). Lengths and areas of arcs, polyline bulges, splines and ellipses are measured, not taken from control points. Closed shapes also have an area.
+- A hatch is its outline minus its islands; its length is the boundary including the islands. A note on the entity says so.
+- There is a total only when one entity type matched. A hatch and the outline it fills are the same area, so with several types the result lists them separately and warns instead of adding them. Report which entity the number comes from.
+- The default space is `model`. A layout (`--space <layout>`) is measured in its paper units (millimetres or inches), not in the model's.
+- Block references, text, dimensions and other types are counted under `skipped`, not measured. Measure inside the block definition (`--space <block>`) when you need it.
+- Per-entity values are in `measurements.json`; the summary has the unit, count, per-type and per-layer totals.
+- Never read dimensions off a rendered PNG.
 
 ### Edit a drawing
 

@@ -83,6 +83,11 @@ Helper: `load_dxf(path: Path, ctx) -> ezdxf.document.Drawing` (DWG input is conv
 - `diff A B [--full]`: semantic diff of two fingerprints (or two drawings, fingerprinting them first). Match entities by content signature when handles differ; ignore save noise (anonymous block names `*U<n>`, `*Paper_Space<n>`, viewport ids, `$HANDSEED`, dictionaries); report added/removed/changed/moved with old/new values; list `unmatched` as "to confirm" and **never claim a removal's cause**. Summary = counts and the first ~10 changes; full list in `diff.json`. Must score 3/3 true changes with 0 false alarms on `plan_v2.dxf` vs `sheet_set_v1.dxf` (`changes.json` is the ground truth).
 
 ## `render.py` (T1) — command `render`
+`measure FILE (--layer L | --type T | --handle H) [--space model|paper|all|NAME] [--window X1,Y1,X2,Y2] [--unit mm|cm|m|km|in|ft] [--assume-unit U]`
+- Module `cadlib.measure`: `measure_entity(entity)` returns `Measure(length, area, closed, note)` or None; `unit_factor(insunits, name)`.
+- Geometry from `ezdxf.path` (Bezier segments 16, flattening 1e-6 of the entity size), hatches from `path.from_hatch` with even-odd islands.
+- Writes `measurements.json`; a filter is required; `NO_UNITS` (exit 6) when `$INSUNITS` is 0 and no `--assume-unit`.
+
 `qa [FILE] [--pdf PDF] [--layout NAME | --size WxH] [--pages N] [--require TEXT ...] [--forbid TEXT ...]`
 - Module `cadlib.qa`: `check_drawing(doc, info)` and `check_pdf(path, expected_mm=, expect_pages=, require=, forbid=)` return `Finding(id, severity, where, message)`; severities are error, warning, info.
 - Writes `findings.json`; the summary has counts and the first five findings. Errors give exit 7 with `QA_FAILED`; warnings and info give exit 0.
