@@ -86,8 +86,9 @@ def test_everything_missing_still_reports_with_install_commands() -> None:
         assert c[name]["status"] == "missing", name
         assert c[name]["install"], name
     for name in ("plot_deliverable", "edit_dwg"):
-        assert c[name]["status"] == "not_implemented", name
-        assert "no command yet" in c[name]["note"] and "cadlib.acad" in c[name]["note"]
+        # shipped commands that need a COM-capable CAD host, not "not implemented"
+        assert c[name]["status"] == "missing", name
+        assert "COM" in c[name]["note"], name
 
 
 def test_worst_case_output_fits_in_4_kb() -> None:
@@ -108,7 +109,9 @@ def test_windows_with_a_com_host_and_oda_has_every_shipped_capability() -> None:
         c[n]["status"] == "available"
         for n in ("read_dxf", "read_dwg", "convert", "render", "pdf_to_png")
     )
-    assert {c[n]["status"] for n in ("plot_deliverable", "edit_dwg")} == {"not_implemented"}
+    assert {c[n]["status"] for n in ("plot_deliverable", "edit_dwg")} == {"available"}
+    assert c["plot_deliverable"]["via"] == "com" and c["edit_dwg"]["via"] == "com"
+    assert "--allow-com" in c["plot_deliverable"]["note"]
     assert c["read_dwg"]["via"] == "com" and "install" not in c["read_dwg"]
 
 

@@ -4,11 +4,11 @@
 
 Prints one JSON document that follows ``assets/output.schema.json`` (command ``doctor``). The
 interesting part is ``summary.capabilities``: for each capability a ``status`` (available |
-degraded | missing | not_implemented), the ``via`` backend, and for missing or degraded ones an
+degraded | missing), the ``via`` backend, and for missing or degraded ones an
 ``install`` list of commands or download pointers for the current operating system. Capabilities
-describe what the shipped commands can do: read_dxf, read_dwg, convert (dwg<->dxf), render and
-pdf_to_png. ``edit_dwg`` and ``plot_deliverable`` are reported as ``not_implemented`` (no command
-yet; with a CAD host present, custom code can use ``cadlib.acad``).
+describe what the shipped commands can do: read_dxf, read_dwg, convert (dwg<->dxf), render,
+pdf_to_png, and plot_deliverable and edit_dwg, which need a COM-capable CAD host (DXF edits need
+only ezdxf and are covered by read_dxf).
 
 Exit code: 0 with the matrix, even when capabilities are missing (the matrix is the answer).
 Exit 3 only when the Python interpreter itself is older than 3.10. Exit 2 for bad arguments.
@@ -68,11 +68,6 @@ PROGID_PATTERNS: tuple[tuple[str, str], ...] = (
 STATUS_AVAILABLE = "available"
 STATUS_DEGRADED = "degraded"
 STATUS_MISSING = "missing"
-STATUS_NOT_IMPLEMENTED = "not_implemented"
-NO_COMMAND_NOTE = (
-    "no command yet; with a CAD host present, custom code can use cadlib.acad "
-    "(see references/com-automation.md)"
-)
 SUBPROCESS_TIMEOUT_S = 20
 
 
@@ -681,9 +676,22 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         reader["note"] = "approximate: some objects may be dropped; dxf->dwg writes r2004 only"
     caps["convert"] = reader
 
-    # F2 features: reported honestly, not as capabilities of this version
-    caps["plot_deliverable"] = _cap(STATUS_NOT_IMPLEMENTED, None, note=NO_COMMAND_NOTE)
-    caps["edit_dwg"] = _cap(STATUS_NOT_IMPLEMENTED, None, note=NO_COMMAND_NOTE)
+    # plot and DWG edits go through the user's own CAD application (COM); DXF edits need only
+    # ezdxf and are covered by read_dxf
+    for name, what in (("plot_deliverable", "plotting"), ("edit_dwg", "editing a DWG")):
+        if com_ready:
+            caps[name] = _cap(
+                STATUS_AVAILABLE,
+                "com",
+                note="starts a CAD instance: ask the user, then use --allow-com",
+            )
+        else:
+            caps[name] = _cap(
+                STATUS_MISSING,
+                None,
+                (opts["cad"] if env.platform == "win32" else []),
+                f"{what} needs Windows and a COM-capable CAD application (AutoCAD, BricsCAD, ...)",
+            )
 
     caps["pdf_to_png"] = (
         _cap(STATUS_AVAILABLE, "pypdfium2")
