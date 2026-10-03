@@ -1,6 +1,6 @@
 # CAD_CONVENTIONS — standard default (adapt before use)
 
-DEFAULTS, NOT PROJECT RULES. Derived from ISO drafting standards and common CAD practice; no project has agreed to them. Read this when a project has no `CAD_CONVENTIONS.md` and the user chose the standard default: copy it into the project, replace every `<…>`, confirm or change each line with the user, set §0 status to "agreed", delete this banner. Keys match `cad-conventions-template.md`. Tags: `[norm: …]` standard · `[practice]` common practice · `†` secondary source, confirm.
+DEFAULTS, NOT PROJECT RULES. Derived from ISO drafting standards and common CAD practice; no project has agreed to them. Read this when a project has no `CAD_CONVENTIONS.md` and the user chose the standard default: copy it into the project, replace every `<…>`, confirm or change each line with the user, set §0 status to "agreed", delete this banner. Keys match `cad-conventions-template.md`. Tags: `[norm: …]` standard · `[practice]` common practice.
 
 ---
 
@@ -60,7 +60,7 @@ DEFAULTS, NOT PROJECT RULES. Derived from ISO drafting standards and common CAD 
 |---|---|---|---|---|
 | `A--_____G-` | grid lines and grid labels | 0.18 | long-dashed dotted | yes |
 | `A-WALL__E-N` | new elements cut by the plan or section plane (example: walls) | 0.50 | continuous | yes |
-| `A-WALL__E-E` · `A-WALL__E-R` † | existing to remain · to be removed | 0.35 · 0.25 | continuous · dashed | yes |
+| `A-WALL__E-E` · `A-WALL__E-R` | existing to remain · to be removed | 0.35 · 0.25 | continuous · dashed | yes |
 | `A-EQUIP_E-` | elements seen in view (example: equipment) | 0.25 | continuous | yes |
 | `A--_____T-` · `A--_____D-` · `A--_____J-` | model text · dimensions and levels · section and detail marks | 0.25 · 0.18 · 0.25 | continuous | yes |
 | `A--_____H-` · `A--_____K-` | hatching · revision clouds and tags | 0.13 · 0.35 | continuous | yes |
@@ -102,7 +102,7 @@ DEFAULTS, NOT PROJECT RULES. Derived from ISO drafting standards and common CAD 
 - **Where revision is recorded (title block, table, file name, metadata)**: title block REV = last table row = transmittal; not in the file name [practice]
 
 ## 12. Files and references
-- **File-name pattern, regex, example**: `PROJECT-ORIGINATOR-FUNCTION-SPATIAL-FORM-DISCIPLINE-NUMBER`, hyphens only, e.g. `PRJ01-ORG-ZZ-00-DR-A-0101.dwg`; stem regex `^[A-Z0-9]+(-[A-Z0-9]+){6}$` [practice: ISO 19650-2 UK National Annex †]
+- **File-name pattern, regex, example**: `PROJECT-ORIGINATOR-FUNCTION-SPATIAL-FORM-DISCIPLINE-NUMBER`, hyphens only, e.g. `PRJ01-ORG-ZZ-00-DR-A-0101.dwg`; stem regex `^[A-Z0-9]+(-[A-Z0-9]+){6}$` [practice: common in ISO 19650 projects]
 - **DWG / DXF version for delivery**: the version received; new files in the version agreed with recipients [practice]
 - **XREF path type, binding and overlay policy**: relative paths; overlay unless nesting is intended; bind only for the final archive [practice]
 - **Folder structure (work in progress, shared, published, archive)**: `WIP/`, `SHARED/`, `PUBLISHED/`, `ARCHIVE/` (superseded issues) [practice]

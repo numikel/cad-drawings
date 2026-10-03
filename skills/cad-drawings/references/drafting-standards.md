@@ -2,9 +2,9 @@
 
 Read this when you are about to add, change or delete content in a DWG/DXF drawing, create or modify a layout (sheet), or plot/export sheets, and the project's `CAD_CONVENTIONS.md` is missing or silent on the point. Project conventions always win over this file.
 
-**BEFORE PUBLICATION:** The maintainer must review all norm citations (ISO/ASME standards referenced) to ensure they are accurate, current and properly paraphrased. Paraphrases below are based on secondary sources and checked against official catalogues in 2026-09 (see §16), but standard texts are paywalled and must be verified against official editions before being relied upon in a production workflow.
+**Note for the reader:** the standards cited here are paywalled. The text below paraphrases them from secondary sources and was checked against the publishers' catalogues in 2026-09 (see §16); it is a guide to where to look, not a substitute for the standard. Before relying on a value in a production workflow, confirm it in the edition your project uses.
 
-Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause is where to look, the wording here is ours). `[practice]` = widely used CAD practice, not a standard. `†` = taken from secondary sources; confirm against the standard before relying on it.
+Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause is where to look, the wording here is ours). `[practice]` = widely used CAD practice, not a standard.
 
 ## 1. Precedence and first moves
 
@@ -54,7 +54,7 @@ Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause 
 - Revision index: A, B, C … then AA, AB …, or 1, 2, 3 …; avoid I and O. The date of issue changes with every released version. Status words such as "In preparation", "Under approval", "Released", "Withdrawn". [norm: ISO 7200:2004 §5.1.4, §5.1.5, §5.3.8]
 - Scale placement: ISO 5455 puts the main scale in the title block; ISO 7200 keeps the title block minimal and shows scale and projection symbol outside it, only when used. Follow the sheet template. [norm: ISO 5455:1979 §4; ISO 7200:2004 §4]
 - Construction sheets: figures in rows and columns, main figure top left; a text column on the right holds explanations (symbols, abbreviations, units), instructions, references, a location key plan with north arrow, the revision table and the title block; plan for folding to A4. [norm: ISO 9431 §3–5]
-- US sheets: inch sizes A (8.5 × 11 in) to F (28 × 40 in †) plus metric sizes. [norm: ASME Y14.1-2020] US architectural practice often uses ARCH sizes, e.g. 24 × 36, 30 × 42, 36 × 48 in. [practice †]
+- US sheets: inch sizes A (8.5 × 11 in) up to F plus metric sizes. [norm: ASME Y14.1-2020]
 - Title blocks, revision rows and tags are blocks with attributes (or fields): edit attribute values, never overlay loose text. Never fill approval, signature or stamp fields for anyone; leave unknown mandatory fields empty and report them. [practice]
 
 ## 5. Scales
@@ -72,12 +72,12 @@ Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause 
 - Keep at least 0.7 mm between parallel lines on paper; dashed and chain lines cross and meet at dashes, not gaps. [norm: ISO 128-2 §6.1–6.2]
 - Construction drawings: two or three widths per drawing; elements cut by the section plane heavier than elements seen beyond it; material boundaries in view thin. [norm: ISO 7519:2025 §5.5 and ISO 128-2 Annex B]
 - Typical groups (narrow/wide/extra-wide): 0.18/0.35/0.7 for A3–A2 or dense sheets; 0.25/0.5/1.0 for A1–A0. Lineweights come from layers or the plot style table, not per-object values. [practice]
-- US: two widths, thin ≥ 0.3 mm and thick ≥ 0.6 mm. [norm: ASME Y14.2 †] The NCS Plotting Guidelines use the same ISO series. [norm: US NCS]
+- US: the NCS Plotting Guidelines use the same ISO series of widths. [norm: US NCS]
 
 ## 7. Lettering and text
 
 - Nominal heights (capital height, on paper): 1.8, 2.5, 3.5, 5, 7, 10, 14, 20 mm. Stroke ≈ h/10 (type B/CB, vertical preferred) or h/14 (type A/CA); spacing between characters ≈ twice the stroke; upright or sloped 75°. [norm: ISO 3098-1:2015 §4–5]
-- Anything a reader must read ≥ 2.5 mm on the sheet; ≥ 3.5 mm when sheets are routinely printed at half size. [practice] US minimum 3 mm (0.12 in). [norm: ASME Y14.2 †]
+- Anything a reader must read ≥ 2.5 mm on the sheet; ≥ 3.5 mm when sheets are routinely printed at half size. [practice]
 - Typical hierarchy: 2.5 notes and dimensions · 3.5 labels · 5 view titles · 7 drawing number and title. [practice] One text height for all dimensions on a drawing. [norm: ISO 129-1 §4.1.7]
 - Model-space text height = paper height × scale denominator (2.5 mm at 1:100 in a millimetre model = 250). Annotative objects store a paper height and show only in viewports whose annotation scale they carry. Paper-space text is drawn at full size. [practice]
 - Keep the drawing's language, terms, capitalization and abbreviations; explain symbols and abbreviations in the legend; prefer graphics to words. [norm: ISO 128-1 §5 d)]
@@ -93,7 +93,7 @@ Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause 
 ## 9. Layers
 
 - Use the project's layer standard; otherwise extend the naming pattern found in the drawing. No near-duplicates ("Walls", "WALLS_1"). [practice]
-- ISO structure: mandatory Agent responsible (2 characters) + Element (6) + Presentation (2); optional Status (1 †), Sector (4 †), Phase (1 †), Projection (1 †), Scale (1 †), Work package (2 †), User-defined. Fixed field widths for wildcard selection; characters A–Z, 0–9, `-` (all values / no further subdivision) and `_` (unused or undecided); trailing optional fields may be omitted; document any project variant. [norm: ISO 13567-2:2017 §4–7]
+- ISO structure: mandatory Agent responsible (2 characters) + Element (6) + Presentation (2); optional Status, Sector, Phase, Projection, Scale, Work package and User-defined fields (widths: see the standard). Fixed field widths for wildcard selection; characters A–Z, 0–9, `-` (all values / no further subdivision) and `_` (unused or undecided); trailing optional fields may be omitted; document any project variant. [norm: ISO 13567-2:2017 §4–7]
 - Presentation codes (first character, coarse M model / P page): E element graphics, T text, H hatching, D dimensions, J section/detail marks, K revision marks, G grid, U user (R red lines, C construction lines), B border (F frame lines, O other graphics), V sheet text (W title, N notes), I tables (L legends, S schedules). [norm: ISO 13567-2:2017 §6.3]
 - US: `Discipline(1–2)-Major(4)[-Minor(4)[-Minor(4)]][-Status(1)]`, e.g. `A-WALL-FULL-N`; status N new, E existing to remain, D existing to demolish, F future, T temporary, M to be moved, X not in contract, A abandoned, 1–9 phases. [norm: US NCS, AIA CAD Layer Guidelines]
 - No content on layer 0 (reserve it for block-definition geometry) or on Defpoints. [practice]
