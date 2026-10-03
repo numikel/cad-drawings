@@ -656,7 +656,14 @@ class Doc:
             raise CadError(
                 "BAD_ARGS", "saving through Doc.close is not supported", exit_code=ExitCode.BAD_ARGS
             )
-        retry_expr(lambda: self.raw.Close(False))
+        try:
+            retry_expr(lambda: self.raw.Close(False))
+        except Exception:
+            # Ask the application for a fresh proxy of the same file. A document left open with
+            # unsaved page-setup changes makes Quit raise a "Save changes?" dialog that blocks a
+            # hidden instance until the watchdog kills it.
+            if not self.session._close_by_path(self.key):
+                raise
         self.closed = True
         self.session._forget(self)
 
@@ -1121,6 +1128,38 @@ class AcadSession:
             except Exception as exc:  # noqa: BLE001 - keep closing the others
                 self._unhealthy = True
                 self._warn(f"could not close {doc.path.name}: {exc}")
+        self._sweep_open_documents()
+
+    def _close_by_path(self, key: str) -> bool:
+        """Close the open document whose normalised path is ``key`` through a fresh proxy."""
+        for raw in self._iter_raw_docs():
+            name = None
+            with contextlib.suppress(Exception):  # unreadable document: try the next one
+                name = retry_expr(lambda raw=raw: raw.FullName)
+            if name is not None and normalize_path(Path(str(name))) == key:
+                retry_expr(lambda raw=raw: raw.Close(False))
+                return True
+        return False
+
+    def _sweep_open_documents(self) -> None:
+        """Close whatever is still open in an instance we own, discarding changes.
+
+        Only for an instance this session started: it holds nothing of the user's, and a
+        modified document left open would make Quit raise a modal dialog.
+        """
+        if not self.owned or self._dead:
+            return
+        try:
+            raws = list(self._iter_raw_docs())
+        except Exception as exc:  # noqa: BLE001
+            self._warn(f"could not list open documents before quitting: {exc}")
+            return
+        for raw in raws:
+            try:
+                retry_expr(lambda raw=raw: raw.Close(False))
+            except Exception as exc:  # noqa: BLE001 - quit escalation still follows
+                self._unhealthy = True
+                self._warn(f"could not close a leftover document: {exc}")
 
     def _close_quietly(self, doc: Doc) -> None:
         try:

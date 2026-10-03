@@ -89,6 +89,7 @@ class FakeRawDoc:
         self.saveas_writes: str | None = ""  # content SaveAs writes; None = writes nothing
         self.close_error: Exception | None = None
         self.closed = False
+        self.collection: Any = None  # the Documents collection that lists this document
 
     @property
     def Layouts(self) -> Any:
@@ -116,6 +117,8 @@ class FakeRawDoc:
             raise self.close_error
         self.closed = True
         self.events.append("doc.close")
+        if self.collection is not None and self in self.collection.items:
+            self.collection.items.remove(self)  # a closed document leaves the collection
 
 
 class FakeDocuments:
@@ -138,6 +141,7 @@ class FakeDocuments:
         raw = self.next_open or FakeRawDoc(path, self.app.events)
         raw.FullName = path
         raw.events = self.app.events
+        raw.collection = self
         self.items.append(raw)
         for suffix in self.app.create_on_open:
             Path(path).with_suffix(suffix).write_text("lock", encoding="utf-8")
@@ -1645,3 +1649,58 @@ def test_verify_pdf_accepts_a_page_with_content_and_an_unknown_count(
 
 def test_pdf_object_count_is_none_for_a_file_it_cannot_read(tmp_path: Path) -> None:
     assert acad._pdf_object_count(_pdf_file(tmp_path)) is None
+
+
+# --- closing documents whose first COM proxy has gone stale ---------------------------------------
+
+
+def test_close_falls_back_to_a_fresh_proxy_when_the_opened_one_has_gone_stale(
+    clock: Clock, tmp_path: Path
+) -> None:
+    """Real case: Documents.Open returned a proxy that later raised "Open.Close" (late binding).
+
+    The document then stayed open with unsaved page-setup changes and Quit raised the
+    "Save changes?" dialog in a hidden CAD instance.
+    """
+    app = FakeApp()
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    session = make_session(app)
+    doc = session.open(drawing)
+    fresh = FakeRawDoc(str(drawing), app.events)
+    fresh.collection = app.Documents
+    app.Documents.items[0] = fresh  # the application hands out a working proxy for the same file
+    doc.raw.close_error = AttributeError("Open.Close")
+    doc.close()
+    assert fresh.closed and doc.closed and doc not in session.documents
+    assert not session._unhealthy
+
+
+def test_quit_sweeps_remaining_documents_of_an_owned_instance_before_quitting(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, tmp_path: Path
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    drawing = tmp_path / "a.dwg"
+    drawing.write_text("x")
+    session = make_session(app)
+    doc = session.open(drawing)
+    doc.raw.close_error = AttributeError("Open.Close")  # the ordinary close cannot work
+    leftover = FakeRawDoc(str(drawing), app.events)  # still open in the instance, dirty
+    leftover.collection = app.Documents
+    app.Documents.items = [leftover]
+    session.quit()
+    assert leftover.closed, "a dirty document left open makes Quit raise a modal dialog"
+    assert app.events.index("doc.close") < app.events.index("quit")
+
+
+def test_quit_does_not_sweep_documents_of_a_user_session(
+    monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    app = FakeApp()
+    patch_process(monkeypatch, app, "quit")
+    users = FakeRawDoc("D:/work/own.dwg", app.events)
+    app.Documents.items = [users]
+    session = make_session(app, owned=False)
+    session.quit()
+    assert not users.closed
