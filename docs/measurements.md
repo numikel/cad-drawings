@@ -100,6 +100,14 @@ After the fixes: circle area 2e-6 relative error, circle length 3e-7, 2 649 line
 
 Limits of this check: in most of the sample sheets model space holds only block insertions, so only two drawings gave measurable data; ellipses, hatches and polylines with arcs were measured but not compared with an independent number; one `qa` run ended once with an unexpected error after a correct conversion and did not recur, so its cause is unknown; `register` is arithmetic on supplied coordinates and is covered by unit tests only, not by a real survey or underlay.
 
+## Does the description still trigger it? Second check, after `measure`, `qa` and `register` (2026-10-03)
+
+Same method with nine competing skills (the earlier eight plus a GIS skill) and twenty new requests in English and Polish, the expected answers written down before the run. Ten were requests for what the new commands do (area of a hatch, total length on a layer, unit check, pre-delivery check of a DXF, page size and revision text of a plotted PDF, aligning a surveyor's underlay from common points, largest closed polyline with perimeter and area). Ten were close but out of scope (georeferencing a scanned map, reprojecting a shapefile, polygon areas in GeoJSON, point-cloud alignment, STL surface area, distances on an aerial photo, IFC to glTF, and three plainly different tasks).
+
+Result: 20 of 20 as expected. Two requests mix this skill with another (a spreadsheet of pipe lengths taken from a drawing, a plotted PDF that must say 'Rev. C'); both chose this skill first, and the judges noted that a second skill would follow.
+
+Limits: still only a handful of competing skills, one judge instance per set, and the GIS skill is the only close neighbour. Wording that never mentions a drawing ('bring my underlay in with a scale and shift from two points') was routed correctly once; a request that names only coordinates and no file was not tried.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
