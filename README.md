@@ -2,10 +2,11 @@
 
 **Let your AI agent read, search, compare, convert and render CAD drawings (DWG and DXF) without wrecking your CAD session.**
 
+[![CI](https://github.com/numikel/cad-drawings/actions/workflows/ci.yml/badge.svg)](https://github.com/numikel/cad-drawings/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](pyproject.toml)
 [![Agent Skill](https://img.shields.io/badge/agent%20skill-agentskills.io-informational.svg)](https://agentskills.io/specification)
-<!-- Add after the first public release: CI status badge, skills.sh badge (https://skills.sh/b/numikel/cad-drawings) -->
+<!-- Add after the first `npx skills add` lists the skill: skills.sh badge (https://skills.sh/b/numikel/cad-drawings) -->
 
 ```bash
 npx skills add numikel/cad-drawings
