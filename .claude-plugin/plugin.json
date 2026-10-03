@@ -1,7 +1,7 @@
 {
   "name": "cad-drawings",
   "displayName": "CAD Drawings",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Let an AI agent inspect, search, compare, convert and render CAD drawings (DWG and DXF) safely on Windows, macOS and Linux.",
   "author": { "name": "numikel", "email": "contact@michalsk.pl" },
   "homepage": "https://github.com/numikel/cad-drawings",

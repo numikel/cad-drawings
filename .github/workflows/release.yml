@@ -50,7 +50,11 @@ jobs:
           import os, re
           version = os.environ["TAG"].removeprefix("v")
           text = open("CHANGELOG.md", encoding="utf-8").read()
-          m = re.search(r"^## \[%s\][^\n]*\n(.*?)(?=^## \[|\Z)" % re.escape(version), text, re.S | re.M)
+          m = None
+          for name in (version, version.split("-")[0]):
+              m = re.search(r"^## \[%s\][^\n]*\n(.*?)(?=^## \[|\Z)" % re.escape(name), text, re.S | re.M)
+              if m:
+                  break
           if not m:
               m = re.search(r"^## \[Unreleased\][^\n]*\n(.*?)(?=^## \[|\Z)", text, re.S | re.M)
           body = (m.group(1).strip() if m else "See CHANGELOG.md.") + "\n"

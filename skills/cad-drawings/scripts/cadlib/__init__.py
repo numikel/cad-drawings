@@ -20,4 +20,4 @@ COMMAND_MODULES = {
     "plot": "plot",
 }
 
-__version__ = "0.1.0"
+__version__ = "0.1.0-rc.1"
