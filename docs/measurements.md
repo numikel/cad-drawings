@@ -79,6 +79,14 @@ About 60 sample DWG files from the maintainer's own licensed CAD installation we
 
 One drawing whose layout holds a single viewport and nothing else still fails the plot with `PLOT_BAD_OUTPUT`. The guard reports what the PDF contains; the cause (an unresolved external reference, or a viewport that shows nothing) was not investigated further.
 
+## Does the description trigger the skill? (2026-10-03)
+
+Two independent model instances played the router: each saw only the `description` of this skill and of seven unrelated ones (PDF, Word, Excel, raster images, Python, 3D/BIM, SVG) and picked one skill per request, or none. Twenty requests in English and Polish: ten that should load this skill (inspect, compare, edit title blocks, plot to PDF, measure an area, failing CAD automation, text search per layout, move a viewport, render without AutoCAD, edit block attributes) and ten that should not (PDF editing and summaries, background removal, Revit, SketchUp, IFC to glTF, Python, SVG logo, Excel, JPG resize).
+
+Result: 10 of 10 positive requests chose this skill and 10 of 10 negative ones did not.
+
+Limits of this check: the competing skills were few and clearly different, only two negatives (IFC to glTF, PDF) sit close to the topic, and a real assistant sees many more skills. It shows that the description is unambiguous about what it covers and excludes; it does not show how it ranks against a large catalogue. Requests that mix CAD with something else (for example a spreadsheet of block counts) were not tried.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
