@@ -118,7 +118,7 @@ Replace a substring in TEXT, MTEXT, or ATTRIB:
 }
 ```
 
-- `old` is matched exactly in the raw string (for MTEXT, formatting codes are included; match on plain text first, then build your `old` string).
+- `old` is matched exactly in the raw string (for MTEXT, formatting codes are included; match on plain text first, then build your `old` string). For MTEXT, take `old` from the hit's `raw` field when `find` returns one: the `text` field is the plain rendering and does not contain the formatting codes.
 - `new` is the replacement; for MTEXT, codes outside the match region are preserved.
 - `count` (optional): if the substring appears more than once, specify how many times to replace. If not given, `old` must occur exactly once.
 
@@ -288,6 +288,8 @@ If verification fails:
 - The edited file is still written (to `<stem>_edited.dxf/dwg` in the run directory) for inspection.
 - The exit code is 7 (`UNINTENDED_CHANGE`), and the report details every discrepancy.
 - The edited file is NOT copied to `--out` (do not deliver it).
+
+**Fields.** CAD re-evaluates fields (for example `FILENAME`, date, sheet number) every time it saves a drawing, so a field's displayed text can change although the plan did not touch it. When an entity that holds a field differs only in its text (and in the anchor or bounding box that follow from new text), it is not reported as unintended: it appears in `verification.field_updates` (handle, scope, layer, old, new), the summary carries `field_updates: <n>`, and a warning says so. A field entity that also changed something else (a layer, a position by more than rounding) still gives exit 7.
 
 Unintended changes can mean:
 - An edit had a side effect (e.g., moving an entity affected a dependent object).

@@ -66,6 +66,19 @@ After the fixes on the same files: every command ran without leftover processes,
 
 Two drawings from one office are a small sample; they say nothing about other CAD versions, drawings with external references on disk, or very large files.
 
+## Second check: sample drawings shipped with a CAD installation (2026-10-03)
+
+About 60 sample DWG files from the maintainer's own licensed CAD installation were run through `info`, `find`, `render`, `plot` and `edit` on a local machine (the files are not published). They exposed four more defects, all fixed:
+
+| Found | Cause | Fix |
+|---|---|---|
+| A layout with a plausible content plotted as one object | The layout used a DWF plotter; assigning the PDF device reset its plot setup | The layout's own device is kept; the PDF device is named only in the plot call (1 → about 18 000 objects) |
+| The CAD application asked to save changes after a read-only run | A stale late-bound proxy was closed instead of the live document | Close through a fresh proxy and sweep leftover documents before quitting |
+| A layout proxy lost members while plotting | The COM proxy went stale after the plot setup changed | The layout is fetched again once on the first failure |
+| `edit` ended with exit 7 on sheets with a `FILENAME` field | CAD recomputed the field on save | Reported as `field_updates`, exit 0 |
+
+One drawing whose layout holds a single viewport and nothing else still fails the plot with `PLOT_BAD_OUTPUT`. The guard reports what the PDF contains; the cause (an unresolved external reference, or a viewport that shows nothing) was not investigated further.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.

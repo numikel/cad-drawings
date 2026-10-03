@@ -13,6 +13,8 @@ First public version (0.1.0 once released). Measured baseline and method: [docs/
 
 - **`plot`:** deliverable PDFs through the user's CAD application (`--allow-com`), one fresh document per layout, explicit page setup (device, media, area, scale, rotation, plot style), verification of every PDF, safe `--dest` copy that never overwrites silently.
 - **`edit`:** executes an edit plan in two passes (validate everything first, then apply) on DXF through ezdxf and on DWG through the user's CAD; six operations (`replace-text`, `set-props`, `delete`, `move`, `clone`, `pan-viewport`); idempotent; checks its own result against the original and reports unintended changes; never touches the original.
+- **`plot` with layouts on another device:** a layout that uses a DWF plotter or a printer keeps its own plot setup; the PDF device is named only in the plot call. A PDF with almost no drawing content fails with `PLOT_BAD_OUTPUT` instead of being reported as success.
+- **`edit` and fields:** fields that CAD re-evaluates on save (for example `FILENAME`) are listed as `field_updates` and no longer make verification fail with exit 7.
 - **References:** `references/plotting.md`, `references/edit-plans.md`.
 - **Read-side commands** (`python scripts/cad.py <command>`): `doctor`, `info`, `find`, `dump`, `fingerprint`, `diff`, `render`, `convert`, `cleanup`. Every command prints one short JSON summary (under about 4 KB) validated against `assets/output.schema.json`; large results go to files in a fresh run directory.
 - **Reading:** DXF through ezdxf; DWG through a converter (ODA File Converter, LibreDWG) or, only with `--allow-com`, the user's own CAD application on Windows.

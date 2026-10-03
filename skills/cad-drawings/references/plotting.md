@@ -42,6 +42,8 @@ Check the PDF outputs in the run directory.
 | `--overwrite` | false | Replace existing files in `--dest` without asking |
 | `--timeout SECONDS` | 100 | Soft time limit per layout |
 
+**Device handling:** a layout that already uses a PDF device is plotted as it is. A layout that uses another real device (a DWF plotter, a printer) keeps it: assigning a new device to such a layout resets its plot setup (area, origin, scale), which on a real drawing produced a PDF with one object instead of about 18 000. The built-in PDF device is named only in the plot call, and the report carries a warning that says so. A layout without any device gets the PDF device assigned. An explicit `--device` is always assigned as asked, with the consequences above.
+
 **Page setup fallbacks:** if the layout has no device, the built-in PDF device is used. Media size, scale, rotation, and area fall back to the layout's own settings if not given.
 
 ## Output
