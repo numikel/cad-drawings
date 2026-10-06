@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -509,7 +510,7 @@ def test_add_sheet_layout_is_reported_outside_printable_area(
 
 def test_text_far_outside_frame_is_warning_and_says_estimate(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
-        lay.add_text("WELL OUTSIDE THE BORDER", height=5).set_placement((414, 100))
+        lay.add_text("WELL OUTSIDE THE BORDER", height=5).set_placement((395, 100))
 
     result = run_qa([str(make_dxf(tmp_path / "t.dxf", build=build))], runs)
     (hit,) = of(result, "TEXT_OUTSIDE_FRAME")
@@ -520,7 +521,7 @@ def test_text_far_outside_frame_is_warning_and_says_estimate(tmp_path: Path, run
 
 def test_mtext_far_outside_frame_is_reported(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
-        lay.add_mtext("note " * 10, dxfattribs={"insert": (500, 100), "char_height": 4})
+        lay.add_mtext("note " * 10, dxfattribs={"insert": (380, 100), "char_height": 4})
 
     result = run_qa([str(make_dxf(tmp_path / "m.dxf", build=build))], runs)
     assert len(of(result, "TEXT_OUTSIDE_FRAME")) == 1
@@ -539,7 +540,7 @@ def test_attrib_outside_frame_is_reported(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
         blk = doc.blocks.new("TB")
         blk.add_attdef("NAME", (0, 0), text="x", height=5)
-        lay.add_blockref("TB", (414, 100)).add_auto_attribs({"NAME": "VERY LONG VALUE HERE"})
+        lay.add_blockref("TB", (395, 100)).add_auto_attribs({"NAME": "VERY LONG VALUE HERE"})
 
     result = run_qa([str(make_dxf(tmp_path / "a.dxf", build=build))], runs)
     (hit,) = of(result, "TEXT_OUTSIDE_FRAME")
@@ -552,13 +553,13 @@ def test_hidden_or_invisible_text_is_ignored(tmp_path: Path, runs: Path) -> None
         doc.layers.add("ICE").freeze()
         doc.layers.add("NOPLOT").dxf.plot = 0
         for name in ("OFF", "ICE", "NOPLOT"):
-            lay.add_text("outside", height=5, dxfattribs={"layer": name}).set_placement((414, 100))
+            lay.add_text("outside", height=5, dxfattribs={"layer": name}).set_placement((395, 100))
         blk = doc.blocks.new("TB")
         blk.add_attdef("NAME", (0, 0), text="x", height=5)
-        ref = lay.add_blockref("TB", (414, 150)).add_auto_attribs({"NAME": "VALUE VALUE"})
+        ref = lay.add_blockref("TB", (395, 150)).add_auto_attribs({"NAME": "VALUE VALUE"})
         for attrib in ref.attribs:
             attrib.dxf.flags = 1  # invisible
-        lay.add_text("", height=5).set_placement((414, 200))  # empty
+        lay.add_text("", height=5).set_placement((395, 200))  # empty
 
     result = run_qa([str(make_dxf(tmp_path / "h.dxf", build=build))], runs)
     assert not of(result, "TEXT_OUTSIDE_FRAME")
@@ -567,7 +568,8 @@ def test_hidden_or_invisible_text_is_ignored(tmp_path: Path, runs: Path) -> None
 def test_text_findings_are_capped_and_the_summary_stays_small(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
         for i in range(80):
-            lay.add_text(f"far away {i}", height=3).set_placement((415, 10 + i * 3))
+            # long enough to stick out of the frame whatever font the machine has
+            lay.add_text(f"far away {i} " + "X" * 60, height=3).set_placement((400, 10 + i * 3))
 
     result = run_qa([str(make_dxf(tmp_path / "many.dxf", build=build))], runs)
     assert len(of(result, "TEXT_OUTSIDE_FRAME")) == 50
@@ -809,7 +811,7 @@ def test_pdf_edge_checks_need_pillow_but_importing_qa_does_not(
 def test_summary_stays_under_2500_bytes_with_many_text_findings(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
         for i in range(60):
-            lay.add_text(f"far away number {i}", height=3).set_placement((415, 10 + i * 4))
+            lay.add_text(f"far away number {i}", height=3).set_placement((380, 10 + i * 4))
 
     result = run_qa([str(make_dxf(tmp_path / "x.dxf", build=build, units=0, xref=True))], runs)
     assert len(json.dumps(result.summary)) < 2500
@@ -901,7 +903,8 @@ def test_summary_counts_are_true_even_when_the_listing_is_capped(
 ) -> None:
     def build(doc: Any, lay: Any) -> None:
         for i in range(121):
-            lay.add_text(f"far {i}", height=2).set_placement((415, 10 + i * 2))
+            # long enough to stick out of the frame whatever font the machine has
+            lay.add_text(f"far {i} " + "X" * 60, height=2).set_placement((402, 10 + i * 2))
 
     result = run_qa([str(make_dxf(tmp_path / "c.dxf", build=build))], runs)
     assert result.summary["warnings"] == 121
@@ -914,7 +917,8 @@ def test_the_time_limit_covers_pdf_rasterisation(tmp_path: Path) -> None:
     from cadlib.util import Deadline
 
     pdf = make_pdf(tmp_path / "t.pdf", (420, 297))
-    expired = Deadline(1e-9)
+    expired = Deadline(0.001)
+    time.sleep(0.1)  # longer than the clock resolution (about 16 ms on Windows)
     with pytest.raises(CadError) as err:
         sheet_frame.pdf_pages_ink(pdf, deadline=expired)
     assert err.value.code == "TIMEOUT"
@@ -1111,3 +1115,68 @@ def test_the_stroke_threshold_is_the_depth_from_the_edge(
     found = pdf_ids(qa.check_pdf(pdf, expected_mm=(420, 297)))
     assert ("PDF_CLIPPED" in found) is is_error
     assert ("PDF_EDGE_MARKS" in found) is (not is_error)
+
+
+# --------------------------------------------------------------------------------------
+# text that crosses the frame, not text that lies beside it
+# --------------------------------------------------------------------------------------
+
+
+def _drawing_area_sheet(tmp_path: Path, build: Callable[[Any, Any], None]) -> Path:
+    """A 36 x 24 in sheet: the frame bounds the drawing area, a title block sits beside it."""
+
+    def setup(doc: Any, lay: Any) -> None:
+        lay.page_setup(size=(36, 24), margins=(0, 0, 0, 0), units="inch")
+        rect(lay, (0.66, 0.26, 30.38, 22.29), layer="FRAME")
+        build(doc, lay)
+
+    return make_dxf(tmp_path / "area.dxf", frame=False, sheet_content=False, build=setup)
+
+
+def _with_content(path: Path) -> Path:
+    doc = ezdxf.readfile(path)
+    doc.layouts.get("Sheet-A").add_line((1, 1), (2, 1))  # content, so the layout is checked
+    doc.saveas(path)
+    return path
+
+
+def test_text_wholly_beside_the_frame_is_not_reported(tmp_path: Path, runs: Path) -> None:
+    def build(doc: Any, lay: Any) -> None:
+        blk = doc.blocks.new("TB")
+        blk.add_attdef("NAME", (0, 0), text="x", height=0.2)
+        for i in range(6):
+            lay.add_blockref("TB", (32.0, 3.0 + i)).add_auto_attribs({"NAME": f"title value {i}"})
+        lay.add_mtext(
+            "SIDE NOTE",
+            dxfattribs={"insert": (0.3, 5.0), "char_height": 0.1, "rotation": 90},
+        )
+
+    dxf = _with_content(_drawing_area_sheet(tmp_path, build))
+    result = run_qa([str(dxf)], runs)
+    assert frames(result)["Sheet-A"] == pytest.approx([0.66, 0.26, 30.38, 22.29])
+    assert not of(result, "TEXT_OUTSIDE_FRAME")
+
+
+def test_text_crossing_the_frame_edge_is_reported(tmp_path: Path, runs: Path) -> None:
+    def build(doc: Any, lay: Any) -> None:
+        lay.add_text("CROSSES THE RIGHT EDGE", height=0.3).set_placement((29.0, 10.0))
+
+    result = run_qa([str(_with_content(_drawing_area_sheet(tmp_path, build)))], runs)
+    (hit,) = of(result, "TEXT_OUTSIDE_FRAME")
+    assert hit["severity"] == "warning" and "estimate" in hit["message"]
+
+
+def test_text_crossing_the_frame_by_less_than_a_tenth_is_clean(tmp_path: Path, runs: Path) -> None:
+    from cadlib import sheet_frame
+
+    text = ezdxf.new("R2018").modelspace().add_text("EDGE", height=0.3)
+    text.set_placement((29.0, 10.0))
+    box = sheet_frame.text_box(text)
+    assert box is not None
+    width = box[2] - box[0]  # 5 % of the text sticks out of the frame (right edge 30.38)
+
+    def build(d: Any, lay: Any) -> None:
+        lay.add_text("EDGE", height=0.3).set_placement((30.38 - width * 0.95, 10.0))
+
+    result = run_qa([str(_with_content(_drawing_area_sheet(tmp_path, build)))], runs)
+    assert not of(result, "TEXT_OUTSIDE_FRAME")

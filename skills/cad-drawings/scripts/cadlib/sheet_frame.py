@@ -542,7 +542,14 @@ def collect_texts(
 
 
 def outside_frame(frame: Box, box: Box) -> bool:
-    """True when ``box`` leaves ``frame`` by more than ``TEXT_TOLERANCE`` of its own size."""
+    """True when ``box`` crosses the edge of ``frame`` and sticks out by more than
+    ``TEXT_TOLERANCE`` of its own size in that axis.
+
+    A box that has nothing in common with the frame lies beside it (a title block next to the
+    drawing area, say) and is not reported.
+    """
+    if box[2] <= frame[0] or box[0] >= frame[2] or box[3] <= frame[1] or box[1] >= frame[3]:
+        return False
     tol_x = max(TEXT_TOLERANCE * (box[2] - box[0]), 1e-9)
     tol_y = max(TEXT_TOLERANCE * (box[3] - box[1]), 1e-9)
     return (
