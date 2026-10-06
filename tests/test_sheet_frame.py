@@ -271,7 +271,7 @@ def test_an_mtext_estimate_ignores_the_stale_stored_rectangle() -> None:
     mtext = layout.add_mtext("x", dxfattribs={"insert": (100, 200), "char_height": 3, "width": 100})
     mtext.dxf.rect_width = 5.0
     mtext.dxf.rect_height = 3.0
-    mtext.text = "word " * 60
+    mtext.text = "word " * 400  # many lines even with a narrow font
     box = sf.text_box(mtext)
     assert box is not None
     assert box[3] - box[1] > 12  # many lines, nothing like the stored 3 mm
@@ -351,7 +351,7 @@ def test_mtext_right_attachment_uses_the_reference_width() -> None:
     )
     box = sf.text_box(mtext)
     assert box is not None
-    assert box[0] == pytest.approx(200) and box[2] < 230  # not [300 - w, 300]
+    assert box[0] == pytest.approx(200) and box[2] < 260  # not [300 - w, 300]
 
 
 def test_text_beside_the_frame_is_not_outside_it() -> None:

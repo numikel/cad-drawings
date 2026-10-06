@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -567,7 +568,8 @@ def test_hidden_or_invisible_text_is_ignored(tmp_path: Path, runs: Path) -> None
 def test_text_findings_are_capped_and_the_summary_stays_small(tmp_path: Path, runs: Path) -> None:
     def build(doc: Any, lay: Any) -> None:
         for i in range(80):
-            lay.add_text(f"far away {i}", height=3).set_placement((400, 10 + i * 3))
+            # long enough to stick out of the frame whatever font the machine has
+            lay.add_text(f"far away {i} " + "X" * 60, height=3).set_placement((400, 10 + i * 3))
 
     result = run_qa([str(make_dxf(tmp_path / "many.dxf", build=build))], runs)
     assert len(of(result, "TEXT_OUTSIDE_FRAME")) == 50
@@ -901,7 +903,8 @@ def test_summary_counts_are_true_even_when_the_listing_is_capped(
 ) -> None:
     def build(doc: Any, lay: Any) -> None:
         for i in range(121):
-            lay.add_text(f"far {i}", height=2).set_placement((402, 10 + i * 2))
+            # long enough to stick out of the frame whatever font the machine has
+            lay.add_text(f"far {i} " + "X" * 60, height=2).set_placement((402, 10 + i * 2))
 
     result = run_qa([str(make_dxf(tmp_path / "c.dxf", build=build))], runs)
     assert result.summary["warnings"] == 121
@@ -914,7 +917,8 @@ def test_the_time_limit_covers_pdf_rasterisation(tmp_path: Path) -> None:
     from cadlib.util import Deadline
 
     pdf = make_pdf(tmp_path / "t.pdf", (420, 297))
-    expired = Deadline(1e-9)
+    expired = Deadline(0.001)
+    time.sleep(0.1)  # longer than the clock resolution (about 16 ms on Windows)
     with pytest.raises(CadError) as err:
         sheet_frame.pdf_pages_ink(pdf, deadline=expired)
     assert err.value.code == "TIMEOUT"
