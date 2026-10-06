@@ -7,20 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.0-rc.2] - 2026-10-06
+## [0.3.0] - 2026-10-06
 
-First check of the 0.3.0 text and frame checks on real drawings (converted sample drawings and their plots; see [docs/measurements.md](docs/measurements.md)).
-
-### Changed
-
-- **`qa` `TEXT_OUTSIDE_FRAME`** reports only texts that cross the frame edge and stick out by more than 10%. A text entirely outside the frame is ignored. On three real sheets the first version reported 61 texts, all of them title-block texts lying beside the drawing border and none crossing it.
-
-## [0.3.0-rc.1] - 2026-10-06
+`qa` checks the sheet frame, the text against the frame and the position of a plotted PDF; `measure` joins loose segments into contours. The checks were run on synthetic drawings and on converted sample drawings with their plots; see [docs/measurements.md](docs/measurements.md).
 
 ### Added
 
 - **`qa` sheet frame checks:** the frame is the largest closed rectangle in a layout (polyline, four lines, or inside a block insert) covering at least 60% of the paper; `--frame-layer NAME` overrides the search. New findings: `FRAME_NOT_FOUND`, `FRAME_OUTSIDE_PAPER` (frame beyond the printable area), `FRAME_CHECK_SKIPPED` (the position cannot be derived, with the reason).
-- **`qa` text checks:** `TEXT_OUTSIDE_FRAME` (estimated text box sticks out of the frame by more than 10%) and, with `--baseline OLD`, `TEXT_GREW` and `TEXT_WRAPPED` (same handle, grown by more than 10% or wraps to more lines). `BASELINE_MISMATCH` says when the two drawings share too few handles. Sizes are estimates; see `references/geometry-and-units.md`.
+- **`qa` text checks:** `TEXT_OUTSIDE_FRAME` (a text crosses the frame edge and its estimated box sticks out by more than 10%; a text entirely outside the frame, such as a title block beside the drawing border, is ignored) and, with `--baseline OLD`, `TEXT_GREW` and `TEXT_WRAPPED` (same handle, grown by more than 10% or wraps to more lines). `BASELINE_MISMATCH` says when the two drawings share too few handles. Sizes are estimates; see `references/geometry-and-units.md`.
 - **`qa` PDF checks:** `PDF_CLIPPED` (error: ink at the page edge along at least 5 mm of it, or a stroke from the edge running at least 50 mm into the page; shorter marks give the info finding `PDF_EDGE_MARKS`), `PDF_SHIFTED` (frame more than 2 mm from where the layout puts it, for 1:1 plots without rotation or centring) and `PDF_TRIM_OUTLINE` (a format outline on the page edge is ignored). The page is rasterised, so backgrounds and clip paths do not count as content.
 - **`measure --join` and `--gap`:** touching LINE, ARC and open polyline, ellipse and spline segments are joined into closed contours (`type: CONTOUR`, with `members`; summary field `joined`). Only unambiguous loops are joined; branching networks and open chains stay separate with a warning.
 - **`references/geometry-and-units.md`:** spaces and coordinate systems, units, printable area and plot origin, measuring, large coordinates, registration, text size estimates, frame detection and a table of traps.
