@@ -15,7 +15,7 @@ compatibility: >-
   via COM (Windows, pywin32 312+), ODA File Converter, or LibreDWG. Run scripts/doctor.py first
   to check what is installed and get install options per platform.
 metadata:
-  version: "0.2.0"
+  version: "0.3.0-rc.1"
 ---
 
 ## Overview

@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-rc.1] - 2026-10-06
+
 ### Added
 
 - **`qa` sheet frame checks:** the frame is the largest closed rectangle in a layout (polyline, four lines, or inside a block insert) covering at least 60% of the paper; `--frame-layer NAME` overrides the search. New findings: `FRAME_NOT_FOUND`, `FRAME_OUTSIDE_PAPER` (frame beyond the printable area), `FRAME_CHECK_SKIPPED` (the position cannot be derived, with the reason).
