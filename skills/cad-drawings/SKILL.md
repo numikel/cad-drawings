@@ -77,7 +77,7 @@ Run `python scripts/cad.py --help` for the full list. Each command can be called
 - `plot` — Deliverable PDFs per layout, plotted by the CAD application (`--allow-com` required)
 - `measure` — Lengths and areas of selected entities in a chosen unit, from `$INSUNITS`; hatch minus islands; no total across entity types
 - `register` — Transform (shift, scale, rotation) between two drawings from control points, with residuals and independent check points; does not open any drawing
-- `qa` — Mechanical checks with severity on a drawing (units, empty layouts, viewport scale, missing xrefs) and on a plotted PDF (page count and size, empty content, required or forbidden text); exit 7 only for errors
+- `qa` — Mechanical checks with severity on a drawing (units, empty layouts, viewport scale, missing xrefs, sheet frame inside the printable area, text sticking out of the frame; `--frame-layer` names the frame layer, `--baseline OLD` reports texts that grew or wrapped since an earlier version) and on a plotted PDF (page count and size, empty content, required or forbidden text, content clipped at the page edge, plot shifted from where the layout puts the frame); exit 7 only for errors
 - `cleanup` — List and delete run directories and cache, with dry-run preview
 
 All commands write to a fresh run directory (never next to the source). Large results go to files; the JSON summary stays under ~4 KB. Commands that can read a DWG accept `--allow-com` (the user agreed to start their CAD application) and `--backend auto|com|oda|libredwg`; `render` uses `--backend auto|com|ezdxf` for the render engine. Failed commands still report `run_dir` and `log`.
@@ -144,6 +144,7 @@ python scripts/cad.py measure <file> --layer <layer> --type HATCH --unit m
 - There is a total only when one entity type matched. A hatch and the outline it fills are the same area, so with several types the result lists them separately and warns instead of adding them. Report which entity the number comes from.
 - The default space is `model`. A layout (`--space <layout>`) is measured in its paper units (millimetres or inches), not in the model's.
 - Block references, text, dimensions and other types are counted under `skipped`, not measured. Measure inside the block definition (`--space <block>`) when you need it.
+- `--join` merges touching LINE, ARC and open polyline, ellipse and spline segments into closed contours (record `type: CONTOUR`, with `members`; the summary has `joined`). Only unambiguous loops are joined: a branching network or an open chain stays as separate segments and the result warns. `--gap DIST` (drawing units, needs `--join`) sets the largest gap to close; the default is tiny, so loose ends that visibly miss each other are reported, not closed. See `references/geometry-and-units.md`.
 - Per-entity values are in `measurements.json`; the summary has the unit, count, per-type and per-layer totals.
 - Never read dimensions off a rendered PNG.
 
@@ -191,7 +192,7 @@ Apply to a DWG (needs consent):
 python scripts/cad.py edit --spec edits.json --allow-com
 ```
 
-The edited file lands in the run directory (with an `_edited` suffix); the original is never written. The command checks its own work: it compares the edited file with the original and exits with 7 and `UNINTENDED_CHANGE` if anything changed that the plan did not ask for, so read `verified` and `unintended` in the summary rather than assuming success. A plan that was already applied reports `already_applied` instead of failing. Confirm visually with `render` when the change affects how a sheet looks. Ask the user before copying the result over an original (`--out ... --overwrite`). Read `references/edit-plans.md` for handle persistence and idempotence: handles belong to one version of one file, so build a new plan from fresh `find` output after every save.
+The edited file lands in the run directory (with an `_edited` suffix); the original is never written. The command checks its own work: it compares the edited file with the original and exits with 7 and `UNINTENDED_CHANGE` if anything changed that the plan did not ask for, so read `verified` and `unintended` in the summary rather than assuming success. A plan that was already applied reports `already_applied` instead of failing. After editing texts, run `qa --baseline <file before the edit>` to catch text that grew or wrapped to more lines. Confirm visually with `render` when the change affects how a sheet looks. Ask the user before copying the result over an original (`--out ... --overwrite`). Read `references/edit-plans.md` for handle persistence and idempotence: handles belong to one version of one file, so build a new plan from fresh `find` output after every save.
 
 ### Plot sheets for delivery
 
@@ -291,6 +292,7 @@ Exit codes: 0 = success, 1 = error, 2 = bad arguments, 3 = missing dependency or
 | `references/com-automation.md` | Write custom code using the COM library or edit through the CAD application (HRESULT table, late-binding traps, `HandleToObject`, retry patterns, document lifecycle, editing traps) |
 | `references/dxf-analysis.md` | Write ezdxf code or understand `edit` on a DXF (entity queries, MTEXT, plain vs raw text, block/space mapping, handle limits) |
 | `references/backends-and-install.md` | `doctor` reports missing components and you need per-OS install commands or license notes |
+| `references/geometry-and-units.md` | Measure, align or check geometry (spaces and coordinate systems, units, printable area and plot origin, `measure --join` and `--gap`, large coordinates, `register`, text size estimates, sheet frame detection) |
 | `references/visual-qa.md` | Verify a rendered or printed sheet (crop assumptions, DPI vs text height, QA checklist) |
 | `references/drafting-standards.md` | Add, edit or delete drawing content without a project `CAD_CONVENTIONS.md` (sheet sizes, title blocks, layers, text heights, units) |
 | `references/cad-conventions-template.md` | Interview the user and create a project's `CAD_CONVENTIONS.md` |

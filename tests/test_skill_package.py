@@ -321,6 +321,15 @@ def test_mentioned_paths_exist(doc_files: dict[Path, str]) -> None:
     assert not missing, missing
 
 
+def test_every_reference_file_is_listed_in_skill_md(skill_text: str) -> None:
+    unlisted = [
+        path.relative_to(SKILL).as_posix()
+        for path in sorted((SKILL / "references").glob("*.md"))
+        if path.relative_to(SKILL).as_posix() not in skill_text
+    ]
+    assert not unlisted, f"reference files missing from the SKILL.md table: {unlisted}"
+
+
 def test_relative_links_resolve(doc_files: dict[Path, str]) -> None:
     broken = []
     for path, text in doc_files.items():

@@ -4,17 +4,23 @@ Geometry comes from ezdxf paths flattened to a tolerance that scales with the en
 bulges, splines and ellipses are measured, not approximated by their control points. A HATCH is
 its outline minus its islands. Totals are given only when a single entity type matched: a hatch
 and the outline it fills would otherwise be counted twice.
+
+With ``--join`` loose LINE, ARC and open polyline/ellipse/spline segments that touch end to end are
+combined into closed contours (records of type CONTOUR). Only unambiguous loops are joined: every
+node must join exactly two segments. Branching networks and open chains stay as they are.
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from ezdxf import edgeminer
 from ezdxf import path as ezpath
 from ezdxf import units as ezunits
 from ezdxf.math import Vec2, is_point_in_polygon_2d
@@ -31,6 +37,9 @@ PAPER_UNITS = {0: 1, 1: 4}  # DXF plot_paper_units: 0 = inches, 1 = millimetres
 RELATIVE_TOLERANCE = 1e-6  # flattening distance as a fraction of the entity's size
 BEZIER_SEGMENTS = 16  # ezdxf's default approximates a quarter circle by one curve: 0.03 % off
 BY_LAYER_LIMIT = 10
+JOIN_GAP_RELATIVE = 1e-6  # default --gap: this fraction of the size of the selected segments
+JOIN_WARNINGS_PER_KIND = 10
+JOINABLE = {"LINE", "ARC", "ELLIPSE", "SPLINE", "LWPOLYLINE", "POLYLINE"}
 MEASURABLE = {
     "LINE",
     "ARC",
@@ -144,6 +153,151 @@ def measure_entity(entity: Any) -> Measure | None:
 
 
 # --------------------------------------------------------------------------------------
+# joining loose segments into contours
+# --------------------------------------------------------------------------------------
+
+
+@dataclass
+class _Segment:
+    """An open entity that may become part of a contour."""
+
+    handle: str
+    layer: str
+    note: str
+    path: Any  # ezdxf Path in drawing units
+    record: dict[str, Any]  # the ordinary record, already in the result unit
+
+
+@dataclass
+class _JoinOutcome:
+    contours: list[dict[str, Any]]
+    used: set[int]  # ids of the records that became members
+    candidates: int
+    gap: float  # drawing units
+    max_gap: float  # drawing units
+    warnings: dict[str, list[str]]
+
+
+def _handle_key(handle: str) -> int:
+    try:
+        return int(handle, 16)
+    except ValueError:
+        return 0
+
+
+def _default_gap(segments: list[_Segment]) -> float:
+    xs: list[float] = []
+    ys: list[float] = []
+    for seg in segments:
+        for point in (seg.path.start, seg.path.end):
+            xs.append(point.x)
+            ys.append(point.y)
+    size = max(max(xs) - min(xs), max(ys) - min(ys)) if xs else 0.0
+    return max(JOIN_GAP_RELATIVE * size, 1e-9)
+
+
+def _suggest_gap(distance: float) -> str:
+    """A --gap value that is certain to span ``distance`` (the 6-digit rounding never undershoots)."""
+    return f"{distance * 1.00001:.6g}"
+
+
+def _loop_path(chain: list[Any]) -> Any:
+    path = ezpath.Path()
+    for edge in chain:
+        part = edge.payload.path
+        path.append_path(part.reversed() if edge.is_reverse else part)
+    path.close()
+    return path
+
+
+def _join_group(
+    segments: list[_Segment], gap_option: float | None, k: float, deadline: Deadline
+) -> _JoinOutcome:
+    """Join the segments of one space; ``k`` converts drawing units to the result unit."""
+    gap = gap_option if gap_option is not None else _default_gap(segments)
+    warnings: dict[str, list[str]] = defaultdict(list)
+    outcome = _JoinOutcome([], set(), len(segments), gap, 0.0, warnings)
+    usable = [s for s in segments if s.path.start.distance(s.path.end) > gap]
+    if not usable:
+        return outcome
+    edges = [
+        edgeminer.make_edge(s.path.start, s.path.end, s.record["length"] or 0.0, payload=s)
+        for s in usable
+    ]
+    shortest = min(s.path.start.distance(s.path.end) for s in usable)
+    if gap >= shortest / 2:
+        warnings["gap"].append(
+            f"--gap {gap:g} is at least half the shortest segment ({shortest:g}): "
+            "unrelated segments may be joined"
+        )
+    deposit = edgeminer.Deposit(edges, gap_tol=gap)
+    networks = sorted(
+        deposit.find_all_networks(), key=lambda n: min(_handle_key(e.payload.handle) for e in n)
+    )
+    for network in networks:
+        deadline.check()
+        members = sorted(network, key=lambda e: _handle_key(e.payload.handle))
+        degrees = [(deposit.degree(e.start), deposit.degree(e.end)) for e in members]
+        flat = [d for pair in degrees for d in pair]
+        if max(flat) >= 3:
+            warnings["branching"].append(
+                f"{len(members)} segments form a branching network; contour ambiguous"
+            )
+            continue
+        if min(flat) == 1:
+            leaves = [
+                point
+                for e, (ds, de) in zip(members, degrees, strict=True)
+                for point, d in ((e.start, ds), (e.end, de))
+                if d == 1
+            ]
+            apart = leaves[0].distance(leaves[1]) if len(leaves) == 2 else 0.0
+            warnings["open"].append(
+                f"open chain of {len(members)} segments; ends are {apart:.6g} apart "
+                f"(--gap {_suggest_gap(apart)} would close it)"
+            )
+            continue
+        chain = list(edgeminer.find_simple_chain(deposit, members[0]))
+        if len(chain) != len(members) or not edgeminer.is_loop(chain, gap_tol=gap):
+            warnings["branching"].append(
+                f"{len(members)} segments do not form a single loop; contour ambiguous"
+            )
+            continue
+        path = _loop_path(chain)
+        length = sum(e.payload.record["length"] or 0.0 for e in chain)
+        area = _area(_flatten(path))
+        if area <= 1e-12 * (length / k) ** 2:
+            warnings["flat"].append(
+                f"{len(members)} segments close up but enclose no area; not joined"
+            )
+            continue
+        steps = [
+            (a.end.distance(b.start)) for a, b in zip(chain, [*chain[1:], chain[0]], strict=True)
+        ]
+        outcome.max_gap = max(outcome.max_gap, *steps)
+        segs = [e.payload for e in chain]
+        layers = list(dict.fromkeys(s.layer for s in segs))
+        notes = list(dict.fromkeys(s.note for s in segs if s.note))
+        if len(layers) > 1:
+            notes.append("members on layers " + ", ".join(layers))
+        outcome.contours.append(
+            {
+                "handle": segs[0].handle,
+                "type": "CONTOUR",
+                "layer": segs[0].layer,
+                "space": segs[0].record["space"],
+                "closed": True,
+                "length": length,
+                "area": area * k * k,
+                "note": "; ".join(notes),
+                "members": [s.handle for s in segs],
+            }
+        )
+        outcome.used.update(id(s.record) for s in segs)
+    return outcome
+
+
+# --------------------------------------------------------------------------------------
 # command
 # --------------------------------------------------------------------------------------
 
@@ -175,6 +329,11 @@ def _run_measure(args: argparse.Namespace) -> Result:
             hint="measuring everything adds up unrelated shapes; narrow it down first (see dump)",
         )
     window = parse_floats(args.window, 4, "--window") if args.window else None
+    if args.gap is not None:
+        if not args.join:
+            raise CadError("BAD_ARGS", "--gap only applies together with --join")
+        if not math.isfinite(args.gap) or args.gap <= 0:
+            raise CadError("BAD_ARGS", f"--gap must be a positive length, got {args.gap}")
     ctx = _new_run("measure", args)
     result = Result("measure", backend="ezdxf")
     deadline = Deadline(args.timeout)
@@ -212,6 +371,8 @@ def _run_measure(args: argparse.Namespace) -> Result:
 
     records: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
+    pending: dict[tuple[str, str | None, str | None], list[_Segment]] = defaultdict(list)
+    factors: dict[tuple[str, str | None, str | None], float] = {}
     for i, loc in enumerate(iter_locations(doc, attribs=False)):
         if i % 2000 == 0:
             deadline.check()
@@ -233,18 +394,58 @@ def _run_measure(args: argparse.Namespace) -> Result:
             skipped[e.dxftype()] += 1
             continue
         k = factor_for(loc)
-        records.append(
-            {
-                "handle": str(e.dxf.handle),
-                "type": e.dxftype(),
-                "layer": e.dxf.layer,
-                "space": loc.layout or loc.block or "model",
-                "closed": m.closed,
-                "length": None if m.length is None else m.length * k,
-                "area": None if m.area is None else m.area * k * k,
-                "note": m.note,
-            }
-        )
+        record = {
+            "handle": str(e.dxf.handle),
+            "type": e.dxftype(),
+            "layer": e.dxf.layer,
+            "space": loc.layout or loc.block or "model",
+            "closed": m.closed,
+            "length": None if m.length is None else m.length * k,
+            "area": None if m.area is None else m.area * k * k,
+            "note": m.note,
+        }
+        records.append(record)
+        if args.join and e.dxftype() in JOINABLE and not m.closed:
+            segment_path = ezpath.make_path(e, segments=BEZIER_SEGMENTS)
+            if not segment_path.has_sub_paths and len(segment_path) > 0:
+                key = (loc.space, loc.layout, loc.block)
+                pending[key].append(
+                    _Segment(record["handle"], record["layer"], m.note, segment_path, record)
+                )
+                factors[key] = k
+    joined: dict[str, Any] | None = None
+    if args.join:
+        used: set[int] = set()
+        contour_records: list[dict[str, Any]] = []
+        join_gap = 0.0
+        join_max_gap = 0.0
+        candidates = 0
+        notices: dict[str, list[str]] = defaultdict(list)
+        for key, group in pending.items():
+            deadline.check()
+            outcome = _join_group(group, args.gap, factors[key], deadline)
+            used |= outcome.used
+            contour_records += outcome.contours
+            candidates += outcome.candidates
+            join_gap = max(join_gap, outcome.gap * factors[key])
+            join_max_gap = max(join_max_gap, outcome.max_gap * factors[key])
+            for kind, messages in outcome.warnings.items():
+                notices[kind] += messages
+        if args.gap is not None and not pending:
+            join_gap = args.gap * model_factor if model_factor else args.gap
+        for messages in notices.values():
+            for text in messages[:JOIN_WARNINGS_PER_KIND]:
+                result.warn(text)
+            if len(messages) > JOIN_WARNINGS_PER_KIND:
+                result.warn(f"... and {len(messages) - JOIN_WARNINGS_PER_KIND} more like it")
+        records = [r for r in records if id(r) not in used] + contour_records
+        joined = {
+            "contours": len(contour_records),
+            "segments_used": len(used),
+            "segments_left": candidates - len(used),
+            "gap": _sig(join_gap),
+            "max_gap": _sig(join_max_gap),
+        }
     path = ctx.path("measurements.json")
     # plain JSON types, no _jsonable: it rounds floats to 4 decimals (made for coordinates)
     _write_json(path, {"unit": args.unit, "entities": [_rounded(r) for r in records]})
@@ -292,11 +493,19 @@ def _run_measure(args: argparse.Namespace) -> Result:
         },
         "layers_not_shown": max(0, len(layer_rank) - BY_LAYER_LIMIT),
     }
+    if joined is not None:
+        result.summary["joined"] = joined
     if len(type_summary) == 1:
         only = next(iter(type_summary.values()))
         result.summary["length"] = only["length"]
         if "area" in only:
             result.summary["area"] = only["area"]
+    elif len(type_summary) > 1 and "CONTOUR" in type_summary:
+        result.warn(
+            "contours and other records matched, so there is no single total: the contours "
+            "hold the area of their members, loose segments and shapes are separate; read "
+            "by_type, or narrow the selection with --type"
+        )
     elif len(type_summary) > 1:
         result.warn(
             "several entity types matched, so there is no single total: a hatch and the outline it "
@@ -328,6 +537,18 @@ def _add_measure_args(p: argparse.ArgumentParser) -> None:
         help="result unit: mm, cm, m, km, in, ft (default m; areas are unit squared)",
     )
     p.add_argument("--assume-unit", help="unit to assume when $INSUNITS is 0 (ask the user first)")
+    p.add_argument(
+        "--join",
+        action="store_true",
+        help="join touching LINE, ARC and open polyline/ellipse/spline segments into closed "
+        "contours; only simple loops, branching networks stay separate",
+    )
+    p.add_argument(
+        "--gap",
+        type=float,
+        help="with --join: largest gap to close, in drawing units "
+        "(default 1e-6 of the selection's size)",
+    )
     _add_common(p)
 
 
@@ -336,6 +557,7 @@ COMMANDS = {
         help="lengths and areas of selected entities in a chosen unit (hatch minus islands)",
         add_arguments=_add_measure_args,
         run=_run_measure,
-        epilog="example: cad.py measure plan.dxf --layer ROOM --type HATCH --unit m",
+        epilog="example: cad.py measure plan.dxf --layer ROOM --type HATCH --unit m "
+        "(loose lines: --type LINE --join)",
     ),
 }

@@ -110,10 +110,12 @@ Limits: still only a handful of competing skills, one judge instance per set, an
 
 ## What the tests cover now
 
-The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
+The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). The 0.3.0 frame, text and PDF checks and `measure --join` are tested on synthetic drawings and PDFs only (a closed rectangle frame as polyline, as four lines and inside a block; asymmetric margins; wrapped and grown text; shifted, clipped and outlined PDFs; contours with reversed segments, bulges, an extrusion of (0, 0, -1) and survey-size coordinates). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
 
 ## Not yet measured
 
+- The frame, text and PDF checks of 0.3.0 on real plots: the shift check and the clipped-content check have only been run on generated PDFs, so false alarms on real print settings are not ruled out.
+- Text size estimates against the fonts of real title blocks (the estimate depends on the font found on the machine).
 - More real-world drawings: only two real files have been checked, and none with external references on disk or with other CAD versions.
 - Behaviour on macOS and Linux outside CI (rendering and conversion are portable; CAD automation is Windows-only).
 - Other CAD applications that expose the same COM interface (BricsCAD, ZWCAD, GstarCAD are detected but untested).
