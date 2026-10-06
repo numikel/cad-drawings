@@ -13,7 +13,7 @@ All notable changes to this project are documented here. The format follows
 
 - **`qa` sheet frame checks:** the frame is the largest closed rectangle in a layout (polyline, four lines, or inside a block insert) covering at least 60% of the paper; `--frame-layer NAME` overrides the search. New findings: `FRAME_NOT_FOUND`, `FRAME_OUTSIDE_PAPER` (frame beyond the printable area), `FRAME_CHECK_SKIPPED` (the position cannot be derived, with the reason).
 - **`qa` text checks:** `TEXT_OUTSIDE_FRAME` (estimated text box sticks out of the frame by more than 10%) and, with `--baseline OLD`, `TEXT_GREW` and `TEXT_WRAPPED` (same handle, grown by more than 10% or wraps to more lines). `BASELINE_MISMATCH` says when the two drawings share too few handles. Sizes are estimates; see `references/geometry-and-units.md`.
-- **`qa` PDF checks:** `PDF_CLIPPED` (content within 0.5 mm of the page edge), `PDF_SHIFTED` (frame more than 2 mm from where the layout puts it, for 1:1 plots without rotation or centring) and `PDF_TRIM_OUTLINE` (a format outline on the page edge is ignored). The page is rasterised, so backgrounds and clip paths do not count as content.
+- **`qa` PDF checks:** `PDF_CLIPPED` (error: ink at the page edge along at least 5 mm of it, or a stroke from the edge running at least 50 mm into the page; shorter marks give the info finding `PDF_EDGE_MARKS`), `PDF_SHIFTED` (frame more than 2 mm from where the layout puts it, for 1:1 plots without rotation or centring) and `PDF_TRIM_OUTLINE` (a format outline on the page edge is ignored). The page is rasterised, so backgrounds and clip paths do not count as content.
 - **`measure --join` and `--gap`:** touching LINE, ARC and open polyline, ellipse and spline segments are joined into closed contours (`type: CONTOUR`, with `members`; summary field `joined`). Only unambiguous loops are joined; branching networks and open chains stay separate with a warning.
 - **`references/geometry-and-units.md`:** spaces and coordinate systems, units, printable area and plot origin, measuring, large coordinates, registration, text size estimates, frame detection and a table of traps.
 
@@ -21,6 +21,7 @@ All notable changes to this project are documented here. The format follows
 
 - **`qa` on a plotted PDF** can now exit 7 for a PDF that used to pass, because `PDF_CLIPPED` is an error.
 - **`qa`** reports at most 50 findings per id in `findings.json`; the rest is counted in `truncated` and in the summary field `not_listed`.
+- **`qa`** searches block inserts for the sheet frame only up to 50 000 expanded entities per layout; beyond that it stops and reports `FRAME_CHECK_SKIPPED` instead of running until the timeout.
 - `references/visual-qa.md` lists every finding id with its meaning and the action to take.
 
 ## [0.2.0] - 2026-10-03

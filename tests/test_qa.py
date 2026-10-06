@@ -680,7 +680,7 @@ def pdf_ids(found: list[qa.Finding]) -> set[str]:
 
 
 def test_frame_touching_edge_is_pdf_clipped_error(tmp_path: Path) -> None:
-    pdf = make_pdf(tmp_path / "c.pdf", (420, 297), frame_mm=(-5, 10, 400, 287))
+    pdf = make_pdf(tmp_path / "c.pdf", (420, 297), frame_mm=(0.1, 10, 400, 150))
     found = qa.check_pdf(pdf, expected_mm=(420, 297))
     (hit,) = [f for f in found if f.id == "PDF_CLIPPED"]
     assert hit.severity == "error" and hit.where == "c.pdf" and "left" in hit.message
@@ -718,14 +718,16 @@ def test_every_page_is_checked_and_named(tmp_path: Path) -> None:
 
     pdf = tmp_path / "two.pdf"
     with PdfPages(pdf) as pages:
-        for x1 in (10, -5):
+        for x1 in (10, -5):  # the second page has content along its left edge
             fig = Figure(figsize=(420 / 25.4, 297 / 25.4))
             ax = fig.add_axes((0, 0, 1, 1))
             ax.set_xlim(0, 420)
             ax.set_ylim(0, 297)
             ax.axis("off")
             for i in range(10):
-                ax.plot([x1, 400], [20 + i * 20, 20 + i * 20], color="black", linewidth=0.7)
+                ax.plot([40, 400], [20 + i * 20, 20 + i * 20], color="black", linewidth=0.7)
+            if x1 < 0:
+                ax.plot([0.1, 0.1], [20, 200], color="black", linewidth=0.7)  # along the edge
             pages.savefig(fig)
     found = qa.check_pdf(pdf, expect_pages=2)
     assert [f.where for f in found if f.id == "PDF_CLIPPED"] == ["two.pdf p.2"]
@@ -876,7 +878,7 @@ def test_the_frame_check_survives_a_layout_without_paper_limits(tmp_path: Path, 
 def test_a_pdf_alone_gets_the_edge_checks_but_no_frame_comparison(
     tmp_path: Path, runs: Path
 ) -> None:
-    pdf = make_pdf(tmp_path / "c.pdf", (420, 297), frame_mm=(-5, 10, 400, 287))
+    pdf = make_pdf(tmp_path / "c.pdf", (420, 297), frame_mm=(0.1, 10, 400, 150))
     result = run_qa(["--pdf", str(pdf), "--size", "420x297"], runs)
     assert [f["id"] for f in findings(result)] == ["PDF_CLIPPED"]
     assert result.exit_code == ExitCode.PARTIAL
@@ -934,3 +936,178 @@ def test_a_frame_that_was_not_plotted_is_not_mistaken_for_content(
     result = run_qa([str(dxf), "--pdf", str(pdf), "--layout", "Sheet-A"], runs)
     assert not of(result, "PDF_SHIFTED")
     assert any(f["where"] == "nf.pdf" for f in of(result, "FRAME_CHECK_SKIPPED"))
+
+
+# --------------------------------------------------------------------------------------
+# block expansion limit
+# --------------------------------------------------------------------------------------
+
+
+def _bomb(doc: Any, lay: Any, *, frame_inside: bool = False) -> None:
+    """Eight block levels with six INSERTs of the next level each: 6**8 expansions."""
+    levels = 8
+    for i in range(levels, 0, -1):
+        blk = doc.blocks.new(f"L{i}")
+        if i == levels:
+            blk.add_line((0, 0), (1, 1))
+        else:
+            for k in range(6):
+                blk.add_blockref(f"L{i + 1}", (k, 0))
+    lay.add_blockref("L1", (0, 0))
+
+
+def test_block_expansion_is_bounded_and_reported(tmp_path: Path, runs: Path) -> None:
+    import time
+
+    dxf = make_dxf(tmp_path / "bomb.dxf", frame=False, build=_bomb)
+    start = time.monotonic()
+    result = run_qa([str(dxf), "--timeout", "20"], runs)
+    assert time.monotonic() - start < 10.0  # unbounded expansion takes minutes
+    hits = [f for f in of(result, "FRAME_CHECK_SKIPPED") if f["where"] == "Sheet-A"]
+    assert len(hits) == 1 and hits[0]["severity"] == "info"
+    assert "block expansion limit reached (50000 entities)" in hits[0]["message"]
+    assert not of(result, "FRAME_NOT_FOUND")
+    assert frames(result)["Sheet-A"] is None
+    assert result.exit_code == ExitCode.OK
+
+
+def test_the_expansion_counter_is_shared_by_the_whole_recursion() -> None:
+    import time
+
+    from cadlib import sheet_frame
+
+    doc = ezdxf.new("R2018")
+    lay = doc.layouts.new("S")
+    lay.page_setup(size=(420, 297), margins=(0, 0, 0, 0), units="mm")
+    _bomb(doc, lay)
+    setup = sheet_frame.paper_setup(lay)
+    budget = sheet_frame.ExpansionBudget()
+    start = time.monotonic()
+    assert sheet_frame.find_frame(lay, setup, budget=budget) is None
+    assert time.monotonic() - start < 8.0  # unbounded expansion takes minutes
+    assert budget.exhausted
+    assert (
+        sheet_frame.MAX_EXPANDED_ENTITIES <= budget.used <= sheet_frame.MAX_EXPANDED_ENTITIES + 100
+    )
+
+
+def test_a_frame_outside_blocks_is_still_found_when_blocks_blow_up(
+    tmp_path: Path, runs: Path
+) -> None:
+    dxf = make_dxf(tmp_path / "both.dxf", build=_bomb)  # the plain frame is there too
+    result = run_qa([str(dxf), "--timeout", "20"], runs)
+    assert frames(result)["Sheet-A"] == pytest.approx([10, 10, 410, 287])
+    assert any("block expansion limit" in f["message"] for f in of(result, "FRAME_CHECK_SKIPPED"))
+
+
+# --------------------------------------------------------------------------------------
+# marks at the page edge are not a cut-off sheet
+# --------------------------------------------------------------------------------------
+
+
+def test_short_marks_through_the_edge_are_info_not_error(tmp_path: Path, runs: Path) -> None:
+    pdf = make_pdf(
+        tmp_path / "marks.pdf",
+        (420, 297),
+        frame_mm=(20, 20, 400, 277),
+        extra_mm=((-5, 150, 5, 150), (200, -5, 200, 5)),
+    )
+    found = qa.check_pdf(pdf, expected_mm=(420, 297))
+    assert "PDF_CLIPPED" not in pdf_ids(found)
+    hits = [f for f in found if f.id == "PDF_EDGE_MARKS"]
+    assert hits and {f.severity for f in hits} == {"info"} and hits[0].where == "marks.pdf"
+    assert "marks touch the page edge" in hits[0].message
+    assert "left edge" in hits[0].message and "the sheet itself is not cut" in hits[0].message
+    result = run_qa(["--pdf", str(pdf), "--size", "420x297"], runs)
+    assert result.exit_code == ExitCode.OK
+    assert [f["id"] for f in findings(result)] == ["PDF_EDGE_MARKS"]
+
+
+@pytest.mark.parametrize(("length", "is_error"), [(4.0, False), (6.0, True)])
+def test_the_clipped_threshold_is_a_run_of_ink_along_the_edge(
+    tmp_path: Path, length: float, is_error: bool
+) -> None:
+    from cadlib import sheet_frame
+
+    assert sheet_frame.PDF_CLIPPED_MIN_MM == 5.0
+    pdf = make_pdf(
+        tmp_path / "run.pdf",
+        (420, 297),
+        frame_mm=(20, 20, 400, 277),
+        extra_mm=((0.1, 100, 0.1, 100 + length),),
+    )
+    found = pdf_ids(qa.check_pdf(pdf, expected_mm=(420, 297)))
+    assert ("PDF_CLIPPED" in found) is is_error
+    assert ("PDF_EDGE_MARKS" in found) is (not is_error)
+
+
+def test_one_mark_through_the_edge_is_reported_as_info(tmp_path: Path) -> None:
+    pdf = make_pdf(
+        tmp_path / "m.pdf", (420, 297), frame_mm=(20, 20, 400, 277), extra_mm=((-5, 150, 5, 150),)
+    )
+    (hit,) = [f for f in qa.check_pdf(pdf, expected_mm=(420, 297)) if f.id == "PDF_EDGE_MARKS"]
+    assert hit.severity == "info"
+
+
+# --------------------------------------------------------------------------------------
+# a stroke that runs far in from the edge is a cut sheet, a short one is a mark
+# --------------------------------------------------------------------------------------
+
+
+def test_a_frame_with_a_side_beyond_the_page_is_clipped(tmp_path: Path, runs: Path) -> None:
+    pdf = make_pdf(tmp_path / "cut.pdf", (420, 297), frame_mm=(-5, 10, 400, 287))
+    found = qa.check_pdf(pdf, expected_mm=(420, 297))
+    (hit,) = [f for f in found if f.id == "PDF_CLIPPED"]
+    assert hit.severity == "error" and "left" in hit.message and "mm deep" in hit.message
+    result = run_qa(["--pdf", str(pdf), "--size", "420x297"], runs)
+    assert result.exit_code == ExitCode.PARTIAL
+
+
+def test_a_cut_page_of_several_is_named(tmp_path: Path) -> None:
+    from matplotlib.backends.backend_pdf import PdfPages
+    from matplotlib.figure import Figure
+
+    pdf = tmp_path / "pages.pdf"
+    with PdfPages(pdf) as pages:
+        for x1 in (30, -5):
+            fig = Figure(figsize=(420 / 25.4, 297 / 25.4))
+            ax = fig.add_axes((0, 0, 1, 1))
+            ax.set_xlim(0, 420)
+            ax.set_ylim(0, 297)
+            ax.axis("off")
+            for i in range(10):
+                ax.plot([x1, 400], [20 + i * 20, 20 + i * 20], color="black", linewidth=0.7)
+            pages.savefig(fig)
+    found = qa.check_pdf(pdf, expect_pages=2)
+    assert [f.where for f in found if f.id == "PDF_CLIPPED"] == ["pages.pdf p.2"]
+
+
+def test_marks_as_deep_as_on_real_plots_stay_info(tmp_path: Path, runs: Path) -> None:
+    """Corner marks run 15-19 mm in from the edge at the thickness of a hairline."""
+    pdf = make_pdf(
+        tmp_path / "deep.pdf",
+        (420, 297),
+        frame_mm=(20, 20, 400, 277),
+        extra_mm=((-3, 150, 16, 150), (200, -3, 200, 19), (417, 50, 423, 50), (60, 294, 60, 300)),
+    )
+    found = qa.check_pdf(pdf, expected_mm=(420, 297))
+    assert "PDF_CLIPPED" not in pdf_ids(found) and "PDF_EDGE_MARKS" in pdf_ids(found)
+    assert run_qa(["--pdf", str(pdf), "--size", "420x297"], runs).exit_code == ExitCode.OK
+
+
+@pytest.mark.parametrize(("depth", "is_error"), [(30.0, False), (70.0, True)])
+def test_the_stroke_threshold_is_the_depth_from_the_edge(
+    tmp_path: Path, depth: float, is_error: bool
+) -> None:
+    from cadlib import sheet_frame
+
+    assert sheet_frame.PDF_CLIPPED_STROKE_MM == 50.0
+    pdf = make_pdf(
+        tmp_path / "depth.pdf",
+        (420, 297),
+        frame_mm=(20, 20, 400, 277),
+        extra_mm=((-3, 100, depth, 100),),  # not at y=150: a diagonal of make_pdf is flat there,
+    )
+    found = pdf_ids(qa.check_pdf(pdf, expected_mm=(420, 297)))
+    assert ("PDF_CLIPPED" in found) is is_error
+    assert ("PDF_EDGE_MARKS" in found) is (not is_error)

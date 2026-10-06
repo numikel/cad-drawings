@@ -151,6 +151,8 @@ The `qa` command searches for a sheet frame (the outline of the printable area o
 - Four LINE entities that form a rectangle (each pair of opposite sides at the same position within 0.5 mm)
 - A BLOCK inserted in paper space that contains such geometry (the frame's location is the INSERT handle)
 
+**Large block nests:** frames inside block inserts are found by expanding the inserts, up to 50 000 entities per layout. If a block nests itself many times the search stops, the result says so with `FRAME_CHECK_SKIPPED` (info), and a frame found outside blocks is still reported.
+
 **When no frame is found:**
 - If no layout content exists, the result is clean (no frame to find)
 - If content exists but no candidate is found, a `FRAME_NOT_FOUND` info finding is issued (not an error; it means the layout has no obvious frame, which may be intentional)

@@ -108,13 +108,19 @@ Result: 20 of 20 as expected. Two requests mix this skill with another (a spread
 
 Limits: still only a handful of competing skills, one judge instance per set, and the GIS skill is the only close neighbour. Wording that never mentions a drawing ('bring my underlay in with a scale and shift from two points') was routed correctly once; a request that names only coordinates and no file was not tried.
 
+## Fourth check: the PDF edge check on real plots (2026-10-06)
+
+`qa --pdf` was run on 16 distinct PDFs plotted earlier from real drawings (sample drawings shipped with a CAD installation and two plans from a real project). The first version of `PDF_CLIPPED` reported an error on 2 of the 16: the sheet was whole, and only corner marks running off the page touched the edge (0.3 to 0.6 mm of ink). The check now needs at least 5 mm of ink along an edge, or a stroke of at least 50 mm running in from it, before it reports an error; shorter marks give the info finding `PDF_EDGE_MARKS`. After the change the 16 PDFs give no `PDF_CLIPPED`, and three of them give `PDF_EDGE_MARKS`. Two of the plots of the real project were reported as empty by the older `PDF_EMPTY` check; that check was not part of this change and was not examined.
+
+Limits: one run, one machine, PDFs from one plotting setup; a full-page scan or a long line drawn to the edge on purpose can still give a false error.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). The 0.3.0 frame, text and PDF checks and `measure --join` are tested on synthetic drawings and PDFs only (a closed rectangle frame as polyline, as four lines and inside a block; asymmetric margins; wrapped and grown text; shifted, clipped and outlined PDFs; contours with reversed segments, bulges, an extrusion of (0, 0, -1) and survey-size coordinates). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
 
 ## Not yet measured
 
-- The frame, text and PDF checks of 0.3.0 on real plots: the shift check and the clipped-content check have only been run on generated PDFs, so false alarms on real print settings are not ruled out.
+- The shift check (`PDF_SHIFTED`) and the text checks of 0.3.0 on real plots: they have only been run on generated drawings and PDFs.
 - Text size estimates against the fonts of real title blocks (the estimate depends on the font found on the machine).
 - More real-world drawings: only two real files have been checked, and none with external references on disk or with other CAD versions.
 - Behaviour on macOS and Linux outside CI (rendering and conversion are portable; CAD automation is Windows-only).

@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 
 Box = tuple[float, float, float, float]
 
+_INK = bytes([255])  # a mask pixel with ink
+_PAPER = bytes([0])
+
 FRAME_MIN_COVERAGE = 0.60  # a frame covers at least this share of the paper
 FRAME_EDGE_TOL_MM = 0.5
 RECT_TOL_MM = 0.5  # how far from axis-aligned and closed a rectangle may be
@@ -48,10 +51,13 @@ PDF_RASTER_MAX_PIXELS = 40_000_000
 PDF_RASTER_MAX_PAGES = 20
 PDF_INK_LEVEL = 250  # grey values below this are ink
 PDF_EDGE_TOL_MM = 0.5
+PDF_CLIPPED_MIN_MM = 5.0  # ink along an edge shorter than this is a mark, not a cut-off sheet
+PDF_CLIPPED_STROKE_MM = 50.0  # a stroke running this far in from an edge is a cut-off sheet
 PDF_TRIM_COVERAGE = 0.90  # a line along this share of a page edge is the trim outline
 PDF_TRIM_MAX_MM = 2.0  # how thick a trim outline is searched for
 PDF_FRAME_LINE_COVERAGE = 0.5  # a frame side is a line over this share of the expected side
 PDF_SHIFT_TOL_MM = 2.0
+MAX_EXPANDED_ENTITIES = 50_000  # entities produced by expanding blocks, per layout
 MAX_FRAME_LINES = 60  # longest horizontal and vertical lines considered when pairing lines
 
 
@@ -172,6 +178,22 @@ def unprintable_layers(layers: Any) -> frozenset[str]:
 # --------------------------------------------------------------------------------------
 
 
+@dataclass
+class ExpansionBudget:
+    """Counts the entities produced by expanding blocks; shared by one whole search."""
+
+    limit: int = MAX_EXPANDED_ENTITIES
+    used: int = 0
+    exhausted: bool = False
+
+    def take(self, count: int) -> bool:
+        """Account for ``count`` more entities; False once the limit is reached."""
+        self.used += count
+        if self.used > self.limit:
+            self.exhausted = True
+        return not self.exhausted
+
+
 @dataclass(frozen=True)
 class Frame:
     box: Box
@@ -190,7 +212,10 @@ class _Line:
 
 
 def _walk(
-    layout: Any, unprintable: frozenset[str], deadline: Deadline | None
+    layout: Any,
+    unprintable: frozenset[str],
+    deadline: Deadline | None,
+    budget: ExpansionBudget,
 ) -> Iterator[tuple[Any, str, str]]:
     """Entities of a layout and of the blocks inserted in it: (entity, layer, handle).
 
@@ -199,11 +224,13 @@ def _walk(
     """
 
     def inside(insert: Any, layer: str, handle: str, depth: int) -> Iterator[tuple[Any, str, str]]:
-        if depth > MAX_NESTING or insert.mcount > 1:
+        if depth > MAX_NESTING or insert.mcount > 1 or budget.exhausted:
             return
         try:
             content = list(insert.virtual_entities())
         except (ValueError, ZeroDivisionError, AttributeError, const.DXFError):
+            return
+        if not budget.take(len(content)):
             return
         for entity in content:
             inner = entity.dxf.get("layer", "0")
@@ -311,12 +338,16 @@ def find_frame(
     frame_layer: str | None = None,
     unprintable: frozenset[str] = frozenset(),
     deadline: Deadline | None = None,
+    budget: ExpansionBudget | None = None,
 ) -> Frame | None:
     """The sheet frame of a paper layout, or None.
 
     Without ``frame_layer``: the largest candidate that covers at least ``FRAME_MIN_COVERAGE`` of
     the paper, but not the paper outline itself when another candidate exists. With it: the
     largest candidate on that layer, whatever its size.
+
+    Expanding blocks is bounded by ``budget`` (``MAX_EXPANDED_ENTITIES`` entities in all): when it
+    runs out, expansion stops and what was seen so far decides; ``budget.exhausted`` tells.
     """
     unit = setup.unit_mm or 1.0
     tol = RECT_TOL_MM / unit
@@ -326,7 +357,7 @@ def find_frame(
     candidates: list[Frame] = []
     horizontals: list[_Line] = []
     verticals: list[_Line] = []
-    for entity, layer, handle in _walk(layout, unprintable, deadline):
+    for entity, layer, handle in _walk(layout, unprintable, deadline, budget or ExpansionBudget()):
         if wanted is not None and layer.lower() != wanted:
             continue
         kind = entity.dxftype()
@@ -547,6 +578,12 @@ class PageInk:
     trimmed: list[str] = field(default_factory=list)  # sides where a trim outline was removed
     bbox_mm: Box | None = None
     gaps_mm: dict[str, float] = field(default_factory=dict)  # ink to page edge, per side
+    # length (mm, along the edge) of ink within PDF_EDGE_TOL_MM of each edge; sides without
+    # any ink there are left out
+    edge_ink_mm: dict[str, float] = field(default_factory=dict)
+    # how far (mm, perpendicular to the edge) the deepest straight stroke that starts at an
+    # edge runs into the page; sides without any ink at the edge are left out
+    edge_depth_mm: dict[str, float] = field(default_factory=dict)
 
 
 def _box_filter() -> Any:
@@ -607,14 +644,14 @@ def pdf_pages_ink(
             size_mm = (width_pt / 72 * 25.4, height_pt / 72 * 25.4)
             px = (size_mm[0] / mask.width, size_mm[1] / mask.height)
             ink = PageInk(index + 1, size_mm, px, mask)
-            _measure_ink(ink)
+            _measure_ink(ink, deadline)
             pages.append(ink)
     finally:
         document.close()
     return pages, total
 
 
-def _measure_ink(ink: PageInk) -> None:
+def _measure_ink(ink: PageInk, deadline: Deadline | None = None) -> None:
     """Remove a trim outline along the page edges, then find the bounding box of what is left."""
     mask = ink.mask
     width, height = mask.size
@@ -639,6 +676,8 @@ def _measure_ink(ink: PageInk) -> None:
     bbox = mask.getbbox()
     if bbox is None:
         return
+    ink.edge_ink_mm = _edge_ink(ink)
+    ink.edge_depth_mm = _edge_depth(ink, deadline)
     px, py = ink.px_mm
     page_h = ink.size_mm[1]
     ink.bbox_mm = (bbox[0] * px, page_h - bbox[3] * py, bbox[2] * px, page_h - bbox[1] * py)
@@ -648,6 +687,107 @@ def _measure_ink(ink: PageInk) -> None:
         "top": bbox[1] * py,
         "bottom": (height - bbox[3]) * py,
     }
+
+
+def _edge_ink(ink: PageInk) -> dict[str, float]:
+    """How long the ink is along each page edge, within PDF_EDGE_TOL_MM of it."""
+    mask = ink.mask
+    width, height = mask.size
+    px, py = ink.px_mm
+    box = _box_filter()
+    band_x = min(width, max(1, math.ceil(PDF_EDGE_TOL_MM / px)))
+    band_y = min(height, max(1, math.ceil(PDF_EDGE_TOL_MM / py)))
+    strips = {
+        "left": ((0, 0, band_x, height), (1, height), py),
+        "right": ((width - band_x, 0, width, height), (1, height), py),
+        "top": ((0, 0, width, band_y), (width, 1), px),
+        "bottom": ((0, height - band_y, width, height), (width, 1), px),
+    }
+    out: dict[str, float] = {}
+    for side, (region, shape, pixel_mm) in strips.items():
+        profile = mask.crop(region).resize(shape, box).tobytes()
+        inked = sum(1 for v in profile if v)
+        if inked:
+            out[side] = inked * pixel_mm
+    return out
+
+
+def _deepest_run(
+    data: bytes, length: int, lines: list[int], band: int, limit: int, reverse: bool
+) -> int:
+    """The longest run of ink, in pixels, that starts within ``band`` pixels of a line's start.
+
+    ``data`` is a mask (255 = ink) stored as ``length``-pixel lines; ``reverse`` measures from
+    the end of each line. A run is followed only up to ``limit`` pixels.
+    """
+    best = 0
+    for line in lines:
+        chunk = data[line * length : (line + 1) * length]
+        if reverse:
+            chunk = chunk[::-1]
+        start = chunk.find(_INK, 0, band)
+        if start < 0:
+            continue
+        stop = chunk.find(_PAPER, start, start + limit)
+        best = max(best, (limit if stop < 0 else stop) - start)
+    return best
+
+
+def _scan(
+    data: bytes,
+    length: int,
+    lines: list[int],
+    band: int,
+    limit: int,
+    reverse: bool,
+    deadline: Deadline | None,
+) -> int:
+    best = 0
+    for first in range(0, len(lines), 256):
+        if deadline is not None:
+            deadline.check()
+        best = max(
+            best, _deepest_run(data, length, lines[first : first + 256], band, limit, reverse)
+        )
+        if best >= limit:
+            break
+    return best
+
+
+def _edge_depth(ink: PageInk, deadline: Deadline | None) -> dict[str, float]:
+    """How far the deepest straight stroke starting at each page edge runs into the page."""
+    mask = ink.mask
+    width, height = mask.size
+    px, py = ink.px_mm
+    band_x = min(width, max(1, math.ceil(PDF_EDGE_TOL_MM / px)))
+    band_y = min(height, max(1, math.ceil(PDF_EDGE_TOL_MM / py)))
+    limit_x = math.ceil(PDF_CLIPPED_STROKE_MM / px) + 1
+    limit_y = math.ceil(PDF_CLIPPED_STROKE_MM / py) + 1
+    box = _box_filter()
+    out: dict[str, float] = {}
+    if deadline is not None:
+        deadline.check()
+    rows = mask.tobytes()
+    for side in ("left", "right"):
+        if side not in ink.edge_ink_mm:
+            continue
+        region = (0, 0, band_x, height) if side == "left" else (width - band_x, 0, width, height)
+        profile = mask.crop(region).resize((1, height), box).tobytes()
+        active = [r for r, v in enumerate(profile) if v]
+        out[side] = _scan(rows, width, active, band_x, limit_x, side == "right", deadline) * px
+    columns: bytes | None = None
+    for side in ("top", "bottom"):
+        if side not in ink.edge_ink_mm:
+            continue
+        if columns is None:
+            from PIL import Image
+
+            columns = mask.transpose(getattr(Image, "Transpose", Image).TRANSPOSE).tobytes()
+        region = (0, 0, width, band_y) if side == "top" else (0, height - band_y, width, height)
+        profile = mask.crop(region).resize((width, 1), box).tobytes()
+        active = [c for c, v in enumerate(profile) if v]
+        out[side] = _scan(columns, height, active, band_y, limit_y, side == "bottom", deadline) * py
+    return out
 
 
 def _line_cluster(profile: bytes, threshold: float, last: bool) -> tuple[int, int] | None:

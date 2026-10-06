@@ -137,9 +137,29 @@ def check_frames(
                 Finding("FRAME_CHECK_SKIPPED", "info", name, "the layout has no paper size")
             )
             continue
+        budget = sheet_frame.ExpansionBudget()
         frame = sheet_frame.find_frame(
-            layout, setup, frame_layer=frame_layer, unprintable=unprintable, deadline=deadline
+            layout,
+            setup,
+            frame_layer=frame_layer,
+            unprintable=unprintable,
+            deadline=deadline,
+            budget=budget,
         )
+        if budget.exhausted:
+            report.findings.append(
+                Finding(
+                    "FRAME_CHECK_SKIPPED",
+                    "info",
+                    name,
+                    f"block expansion limit reached ({sheet_frame.MAX_EXPANDED_ENTITIES} "
+                    "entities): the frame search is incomplete (a block that nests itself "
+                    "many times?)",
+                )
+            )
+        if frame is None and budget.exhausted:
+            report.frames[name] = None
+            continue
         if frame is None:
             report.frames[name] = None
             where_layer = f" on layer {frame_layer!r}" if frame_layer else ""
@@ -348,16 +368,42 @@ def _edge_findings(
                     "outline of the sheet format and ignored",
                 )
             )
-        close = {s: g for s, g in ink.gaps_mm.items() if g < sheet_frame.PDF_EDGE_TOL_MM}
-        if close:
-            sides = ", ".join(f"{s} {g:.2f} mm" for s, g in close.items())
+        touching = {
+            s: length
+            for s, length in ink.edge_ink_mm.items()
+            if ink.gaps_mm.get(s, 0.0) < sheet_frame.PDF_EDGE_TOL_MM
+        }
+        cut = {
+            s: n
+            for s, n in touching.items()
+            if n >= sheet_frame.PDF_CLIPPED_MIN_MM
+            or ink.edge_depth_mm.get(s, 0.0) >= sheet_frame.PDF_CLIPPED_STROKE_MM
+        }
+        marks = {s: n for s, n in touching.items() if s not in cut}
+        if cut:
+            sides = ", ".join(f"{s} {g:.2f} mm" for s, g in ink.gaps_mm.items() if s in cut)
+            lengths = ", ".join(
+                f"{n:.0f} mm along and {ink.edge_depth_mm.get(s, 0.0):.0f} mm deep at the {s} edge"
+                for s, n in cut.items()
+            )
             found.append(
                 Finding(
                     "PDF_CLIPPED",
                     "error",
                     where,
-                    f"content reaches the page edge ({sides}): the sheet is probably cut off "
-                    "(a shifted plot or a wrong paper size)",
+                    f"content reaches the page edge ({sides}; {lengths}): the sheet is "
+                    "probably cut off (a shifted plot or a wrong paper size)",
+                )
+            )
+        if marks:
+            lengths = ", ".join(f"{n:.1f} mm on the {s} edge" for s, n in marks.items())
+            found.append(
+                Finding(
+                    "PDF_EDGE_MARKS",
+                    "info",
+                    where,
+                    f"marks touch the page edge ({lengths}): the sheet itself is not cut "
+                    f"(under {sheet_frame.PDF_CLIPPED_MIN_MM:g} mm of ink along an edge)",
                 )
             )
     if total != 1 or size_error or not pages:
