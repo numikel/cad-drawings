@@ -7,6 +7,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0-rc.2] - 2026-10-06
+
+First check of the 0.3.0 text and frame checks on real drawings (converted sample drawings and their plots; see [docs/measurements.md](docs/measurements.md)).
+
+### Changed
+
+- **`qa` `TEXT_OUTSIDE_FRAME`** reports only texts that cross the frame edge and stick out by more than 10%. A text entirely outside the frame is ignored. On three real sheets the first version reported 61 texts, all of them title-block texts lying beside the drawing border and none crossing it.
+
 ## [0.3.0-rc.1] - 2026-10-06
 
 ### Added

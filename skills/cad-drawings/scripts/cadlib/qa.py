@@ -217,7 +217,7 @@ def check_frames(
                         "TEXT_OUTSIDE_FRAME",
                         "warning",
                         f"{name}:{item.handle}",
-                        f"{item.kind} extends beyond the sheet frame by more than "
+                        f"{item.kind} crosses the sheet frame and sticks out by more than "
                         f"{sheet_frame.TEXT_TOLERANCE:.0%} of its size (estimate from font "
                         "metrics: check it on the render)",
                     )

@@ -140,7 +140,7 @@ If the MTEXT wraps to multiple lines, the height grows. The result is an **estim
 
 **SHX fonts:** are shape files, not TrueType or OpenType fonts. When a drawing references a missing SHX font (e.g., "SIMPLEX"), the tool substitutes a system font for measurement. The metrics may differ; treat text-size checks as estimates.
 
-**Tolerance:** text-outside-frame checks use a 10% tolerance: if a text bounding box is more than 10% of its own size outside a frame, it is reported; smaller overhangs are ignored.
+**Tolerance:** the text-outside-frame check reports a text only when its box crosses the frame edge and sticks out by more than 10% of its own size; smaller overhangs are ignored. A text that lies entirely outside the frame is not reported, because many sheets keep the title block beside the drawing border and the largest rectangle is then only the drawing area.
 
 ## Sheet frame detection and `--frame-layer`
 

@@ -352,3 +352,11 @@ def test_mtext_right_attachment_uses_the_reference_width() -> None:
     box = sf.text_box(mtext)
     assert box is not None
     assert box[0] == pytest.approx(200) and box[2] < 230  # not [300 - w, 300]
+
+
+def test_text_beside_the_frame_is_not_outside_it() -> None:
+    frame = (10.0, 10.0, 100.0, 100.0)
+    assert not sf.outside_frame(frame, (110, 50, 130, 55))  # wholly to the right
+    assert not sf.outside_frame(frame, (0, 50, 9, 55))  # wholly to the left
+    assert not sf.outside_frame(frame, (50, 100, 60, 105))  # only touching the top edge
+    assert sf.outside_frame(frame, (95, 50, 120, 55))  # crosses the right edge

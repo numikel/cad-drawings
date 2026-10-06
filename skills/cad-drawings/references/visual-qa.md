@@ -29,7 +29,7 @@ This reports `TEXT_GREW` (text bounding box grew by > 10%) and `TEXT_WRAPPED` (M
 **On the drawing:**
 - unset `$INSUNITS`, a layout that holds only viewports, a viewport without a usable scale, an external reference that is missing on disk
 - frame missing or lying outside the printable area (new check: `FRAME_NOT_FOUND`, `FRAME_OUTSIDE_PAPER`)
-- text outside the detected frame (new check: `TEXT_OUTSIDE_FRAME`)
+- text that crosses the detected frame and sticks out of it (new check: `TEXT_OUTSIDE_FRAME`)
 - text changed size or wrapped after editing (with `--baseline`; new checks: `TEXT_GREW`, `TEXT_WRAPPED`)
 
 **On the PDF:**
@@ -49,7 +49,7 @@ This reports `TEXT_GREW` (text bounding box grew by > 10%) and `TEXT_WRAPPED` (M
 | `FRAME_NOT_FOUND` | info | No clear rectangular frame found on the layout. | This is normal if the sheet has no printed frame border. If you expect a frame, check layer names with `dump --type LWPOLYLINE --type POLYLINE`, or use `--frame-layer` to specify a layer. |
 | `FRAME_OUTSIDE_PAPER` | warning | The detected frame extends beyond the printable area. | Check the page setup (margins, orientation). If margins are asymmetric (e.g., 20/5/5/5 mm on left/right/top/bottom), the frame may intentionally overflow. Verify with the user. |
 | `FRAME_CHECK_SKIPPED` | info | Frame position check cannot run because the plot is rotated, scaled, or uses non-standard page setup. | This is expected for rotated and scaled-to-fit plots. Verify the plot visually; the checks do not apply. |
-| `TEXT_OUTSIDE_FRAME` | warning | Text bounding box is more than 10% outside the detected frame. The message says "estimate" because text metrics vary by font and platform. | Check visually that the text is where you expect (inside the frame or intentionally outside). If the overhang is < 10%, it is ignored and is not an error. |
+| `TEXT_OUTSIDE_FRAME` | warning | A text crosses the edge of the detected frame and its estimated box sticks out by more than 10% of its own size. A text entirely outside the frame (a title block beside the drawing border, a margin note) is not reported. The message says "estimate" because text metrics vary by font and platform. | Look at the render: the text probably grew past its cell or was moved over the frame line. If the detected frame is only the drawing area and the text belongs to the title block, nothing to fix; check `frames` in `findings.json` to see which rectangle was taken as the frame. |
 | `TEXT_GREW` | warning | Text bounding box grew by > 10% after editing (with `--baseline`). | Check that the text still fits on the sheet. Render both drawings to compare side-by-side. If intentional (e.g., larger font), no action needed. |
 | `TEXT_WRAPPED` | warning | MTEXT now wraps to more lines than in the baseline. | Check that lines fit on the sheet and don't overlap other content. Render both to compare. Adjust text content or width if needed. |
 | `BASELINE_MISMATCH` | info | Fewer than 50% of texts in the current drawing have a matching handle in the baseline. | This is normal when many texts have been added or deleted. Baseline checks become unreliable below 50% match; read `TEXT_GREW` and `TEXT_WRAPPED` as informational only, not a complete status. |

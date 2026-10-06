@@ -114,6 +114,12 @@ Limits: still only a handful of competing skills, one judge instance per set, an
 
 Limits: one run, one machine, PDFs from one plotting setup; a full-page scan or a long line drawn to the edge on purpose can still give a false error.
 
+## Fifth check: frame, text and shift checks on real drawings (2026-10-06)
+
+`qa` with a drawing, a layout and the PDF plotted from it was run on 16 combinations of converted sample drawings and plots. The first version of `TEXT_OUTSIDE_FRAME` gave 115 warnings. On three sheets checked in detail (61 texts) every one lay entirely outside the detected frame, which was the drawing border: the title block sits beside it. None crossed the frame edge. The check now reports only texts that cross the edge; the same three sheets give none. `PDF_SHIFTED` gave 3 warnings: two for plots of one A3 sheet whose three PDFs disagree with each other by 5 to 10 mm (probably real, since the plot settings differ), and one of 2 mm and 0.5 mm just above the 2 mm threshold, which was not judged. `FRAME_NOT_FOUND` appeared twice, on sheets without a closed rectangle.
+
+Limits: the frame found on sheets with a separate title block is the drawing area, not the sheet; the checks that depend on it (`FRAME_OUTSIDE_PAPER`, the shift check) were not judged against the plotter's intent.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). The 0.3.0 frame, text and PDF checks and `measure --join` are tested on synthetic drawings and PDFs only (a closed rectangle frame as polyline, as four lines and inside a block; asymmetric margins; wrapped and grown text; shifted, clipped and outlined PDFs; contours with reversed segments, bulges, an extrusion of (0, 0, -1) and survey-size coordinates). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.
