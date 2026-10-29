@@ -120,6 +120,24 @@ Limits: one run, one machine, PDFs from one plotting setup; a full-page scan or 
 
 Limits: the frame found on sheets with a separate title block is the drawing area, not the sheet; the checks that depend on it (`FRAME_OUTSIDE_PAPER`, the shift check) were not judged against the plotter's intent.
 
+## Sixth check: adding geometry to a DWG, from a field report (2026-10-29)
+
+A field report described an agent that drew new geometry on a DWG copy in a localized CAD (Polish) with its own raw COM script, needed six draw and plot passes and left CAD processes behind. The cause was an older installed copy of the skill whose `doctor` called working packages (ezdxf 1.4.3, pywin32 311) missing and COM unavailable. The task became eval 7 (add a dashed route on a new layer and a label to a copy of `sheet_set.dwg`, then plot Sheet-A), run on the same localized CAD with the same package versions, one run per cell.
+
+| | Previous version (0.3.0) | This version |
+|---|---|---|
+| Result | Correct route, label and PDF; original unchanged; no process left | Same |
+| `doctor` with ezdxf 1.4.3 and pywin32 311 | DWG reading, conversion and rendering `missing`; plotting `missing` with a proposal to install a CAD application that was installed | Everything `available`, with a note and an optional `upgrade` command |
+| How the geometry was added | After reading the internal contract, five steps reading private modules; used private helpers | The public recipe: `AcadSession`, `ensure_layer`, `point_array`, `stage_copy` |
+| Linetype on the localized CAD | First run failed on `DASHED`; the agent parsed the linetype file and switched to `ACAD_ISO02W100` | One run; `ensure_layer` substituted `ACAD_ISO02W100` and the answer reported it |
+| Tool calls / CAD runs for drawing | 39 / 2 | 28 / 1 |
+
+Both runs used `plot` for the PDF, deleted no output, mentioned the PDF viewer and did not poll with `sleep`, so the skill text gained no rule for those. Both re-plotted on a full-bleed A3 sheet because the generated layout's frame reaches beyond the printable area of the standard A3 media (a property of the fixture that `qa` reports as `FRAME_OUTSIDE_PAPER`).
+
+The same round measured the claim that `PlotToFile` with a device name ignores the page setup, one fresh CAD session per case on a generated A3 sheet and on a real A1 plan. Naming the PDF device kept the page setup in every case; reassigning the plotter or calling `RefreshPlotDeviceInfo()` reset it (the real plan came out as an empty letter-size page). The table is in `references/com-automation.md`. Raw scripts in that round also failed on late-bound `AttributeError: Open.X`, which the retry logic did not treat as transient; it does now.
+
+Limits: one run per cell on generated drawings, one localized CAD language.
+
 ## What the tests cover now
 
 The repository has several hundred automated tests (run `pytest`), plus a small number of tests that start a real CAD application and are excluded from the default run (`pytest -m com`, one at a time, on a machine you are not working on). The 0.3.0 frame, text and PDF checks and `measure --join` are tested on synthetic drawings and PDFs only (a closed rectangle frame as polyline, as four lines and inside a block; asymmetric margins; wrapped and grown text; shifted, clipped and outlined PDFs; contours with reversed segments, bulges, an extrusion of (0, 0, -1) and survey-size coordinates). A real-application check found two mistakes in our own assumptions (how a twisted viewport stores its centre, and that a COM-exported DXF can report viewports as off); both are fixed and recorded in the code comments.

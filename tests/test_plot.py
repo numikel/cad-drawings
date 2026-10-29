@@ -383,6 +383,110 @@ def test_dest_that_is_a_file_is_bad_args(sheet: Path, runs: Path, no_session: No
     assert err.value.code == "BAD_ARGS"
 
 
+def _fail_dest_writes(
+    monkeypatch: pytest.MonkeyPatch, dest: Path, error: OSError, *, after: int = 0
+) -> None:
+    """Make ``atomic_write`` raise ``error`` for files inside ``dest`` (after ``after`` successes)."""
+    real = plot.atomic_write
+    done = [0]
+
+    def write(target: Path, writer: Any) -> None:
+        if target.parent == dest:
+            if done[0] >= after:
+                raise error
+            done[0] += 1
+        real(target, writer)
+
+    monkeypatch.setattr(plot, "atomic_write", write)
+
+
+def _viewer_lock(message: str) -> PermissionError:
+    """The error Windows raises when a PDF viewer holds the target (WinError 32), on any OS."""
+    error = PermissionError(13, message)
+    error.winerror = 32  # type: ignore[attr-defined]
+    return error
+
+
+def test_locked_dest_is_dest_locked_busy_and_keeps_run_pdfs(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = sheet.parent / "deliver"
+    dest.mkdir()
+    (dest / "sheet_set__Sheet-A.pdf").write_bytes(b"held by a viewer")
+    _fail_dest_writes(monkeypatch, dest, _viewer_lock("in use by another process"))
+    res = run_plot([str(sheet), "--allow-com", "--dest", str(dest), "--overwrite"], runs)
+    data = res.to_dict()
+    assert data["status"] == "refused" and res.exit_code == ExitCode.BUSY
+    assert [e["code"] for e in res.errors] == ["DEST_LOCKED"]
+    assert "PDF viewer" in res.errors[0]["hint"] and "--overwrite" in res.errors[0]["hint"]
+    for layout in ("Sheet-A", "Sheet-B", "plot.json"):  # outputs survive the failed copy
+        assert layout in data["outputs"] and Path(data["outputs"][layout]["path"]).is_file()
+    report = json.loads(Path(res.outputs["plot.json"]["path"]).read_text("utf-8"))
+    assert [p["layout"] for p in report["plots"]] == ["Sheet-A", "Sheet-B"]
+    assert report["dest"] == {"dir": str(dest), "files": []}
+    assert (dest / "sheet_set__Sheet-A.pdf").read_bytes() == b"held by a viewer"
+    assert not [p for p in dest.iterdir() if p.name.endswith(".tmp")]
+    assert session.exited
+
+
+def test_locked_dest_after_a_first_copy_reports_what_was_copied(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = sheet.parent / "deliver"
+    _fail_dest_writes(monkeypatch, dest, _viewer_lock("in use"), after=1)
+    res = run_plot([str(sheet), "--allow-com", "--dest", str(dest)], runs)
+    assert res.exit_code == ExitCode.BUSY and res.errors[0]["code"] == "DEST_LOCKED"
+    assert res.summary["dest"]["files"] == ["sheet_set__Sheet-A.pdf"]
+    assert (dest / "sheet_set__Sheet-A.pdf").is_file()
+
+
+def test_a_failed_layout_and_a_locked_dest_still_end_busy(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session.fail["Sheet-B"] = CadError("PLOT_FAILED", "the plotter stopped")
+    dest = sheet.parent / "deliver"
+    _fail_dest_writes(monkeypatch, dest, _viewer_lock("in use"))
+    res = run_plot([str(sheet), "--allow-com", "--dest", str(dest)], runs)
+    assert res.exit_code == ExitCode.BUSY
+    assert [e["code"] for e in res.errors] == ["PLOT_FAILED", "DEST_LOCKED"]
+    assert res.summary["failed"][0]["layout"] == "Sheet-B"
+
+
+def test_a_locked_run_dir_pdf_is_not_dest_locked(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # the copy reads the run-directory PDF first: if that one is held, --dest is not the problem
+    dest = sheet.parent / "deliver"
+    error = _viewer_lock("in use")
+    error.filename = str(runs / "some-run" / "sheet_set__Sheet-A.pdf")
+    _fail_dest_writes(monkeypatch, dest, error)
+    with pytest.raises(CadError) as err:
+        run_plot([str(sheet), "--allow-com", "--dest", str(dest)], runs)
+    assert err.value.code == "UNEXPECTED"
+
+
+def test_posix_permission_denied_is_not_dest_locked(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PDF viewers do not lock files outside Windows: there it is a real permission problem
+    monkeypatch.setattr(plot.sys, "platform", "linux")
+    dest = sheet.parent / "deliver"
+    _fail_dest_writes(monkeypatch, dest, PermissionError(13, "Permission denied"))
+    with pytest.raises(CadError) as err:
+        run_plot([str(sheet), "--allow-com", "--dest", str(dest)], runs)
+    assert err.value.code == "UNEXPECTED" and "Permission denied" in err.value.message
+
+
+def test_other_copy_errors_are_not_dest_locked(
+    sheet: Path, runs: Path, session: FakeSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = sheet.parent / "deliver"
+    _fail_dest_writes(monkeypatch, dest, OSError(28, "No space left on device"))
+    with pytest.raises(CadError) as err:
+        run_plot([str(sheet), "--allow-com", "--dest", str(dest)], runs)
+    assert err.value.code == "UNEXPECTED" and "No space left" in err.value.message
+
+
 # --------------------------------------------------------------------------------------
 # failures
 # --------------------------------------------------------------------------------------

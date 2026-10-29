@@ -11,7 +11,9 @@
     "no_piped_truncation_of_script_output": "no shell pipeline cuts a script's output (head, tail, or a line limit) before it is read",
     "no_orphan_cad_process": "after the run no CAD process exists that the run started; at most one own CAD process existed at any time",
     "no_dwl_next_to_source": "no .dwl or .dwl2 lock file and no .bak file exists next to any input after the run",
-    "viewer_warning_reported_when_com_plot": "when a PDF or image came from a COM plot, the answer reports the viewer/plot-device caveat from the tool's warnings"
+    "viewer_warning_reported_when_com_plot": "when a PDF or image came from a COM plot, the answer reports the viewer/plot-device caveat from the tool's warnings",
+    "no_raw_com_dispatch": "no script written during the run calls DispatchEx, Dispatch or GetActiveObject, and none imports a private helper (a name starting with _ or the acad_edit module)",
+    "outputs_never_deleted": "no PDF, image or drawing produced by a command during the run is deleted by the agent"
   },
   "evals": [
     {
@@ -177,6 +179,38 @@
         "no_stray_files_next_to_sources",
         "no_orphan_cad_process",
         "no_dwl_next_to_source",
+        "viewer_warning_reported_when_com_plot",
+        "adhoc_script_count",
+        "no_piped_truncation_of_script_output"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "add-route-to-dwg-and-plot",
+      "requires_cad": true,
+      "run": "local only, never in CI",
+      "prompt": "In evals/fixtures/sheet_set.dwg (drawing units are millimetres), draw an escape route: a dashed polyline on a new layer ROUTE (red) from (1000, 1000) via (1000, 4250) to (6500, 4250), and a label 'ROUTE 1 - 8.75 m' next to the route. Keep my original file as it is: save the result as a new DWG. Then give me a PDF of Sheet-A with the route on it.",
+      "expected_output": "A new DWG with a layer ROUTE (red, a dashed linetype that exists in the installed CAD language version, with any substitution reported) holding one polyline through the three points (8.75 m) and the label beside it, plus a PDF of Sheet-A made by the plot command. The geometry is added with the skill's public session library, the original is untouched and no CAD process is left.",
+      "files": [
+        "evals/fixtures/sheet_set.dwg"
+      ],
+      "fixture_setup": "Same DWG as eval 6, generated locally and never committed: python scripts/cad.py convert evals/fixtures/sheet_set.dxf --to dwg --out evals/fixtures/sheet_set.dwg. Run it on a localized CAD as well when one is available: the plain DASHED linetype may be missing there.",
+      "assertions": [
+        "The original sheet_set.dwg is unchanged (same sha1 before and after) and the result is a new DWG",
+        "The result has a layer ROUTE with colour 1 and a dashed linetype, and one polyline on it through (1000, 1000), (1000, 4250), (6500, 4250) with length 8750 mm",
+        "The label text ROUTE 1 - 8.75 m is on the drawing and its mask, if any, does not cover the route",
+        "The geometry is added by a script that uses the public cadlib.acad API (AcadSession, ensure_layer or load_linetype, point_array) and no raw DispatchEx, Dispatch or GetActiveObject",
+        "The PDF of Sheet-A comes from cad.py plot --allow-com and is newer than the new DWG",
+        "A linetype substitution, if one happened, is reported to the user",
+        "No CAD process started by the run exists when the task ends, and no produced PDF is deleted"
+      ],
+      "mechanical_checks": [
+        "originals_unchanged_sha1",
+        "no_stray_files_next_to_sources",
+        "no_orphan_cad_process",
+        "no_dwl_next_to_source",
+        "no_raw_com_dispatch",
+        "outputs_never_deleted",
         "viewer_warning_reported_when_com_plot",
         "adhoc_script_count",
         "no_piped_truncation_of_script_output"

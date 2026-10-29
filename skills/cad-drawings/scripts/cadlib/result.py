@@ -53,6 +53,7 @@ ERROR_CODES: dict[str, ExitCode] = {
     # resource busy
     "BUSY": ExitCode.BUSY,
     "COM_TRANSIENT": ExitCode.BUSY,
+    "DEST_LOCKED": ExitCode.BUSY,
     "DISK_LOW": ExitCode.BUSY,
     "DOC_ALREADY_OPEN": ExitCode.BUSY,
     "DOC_OPEN_BY_USER": ExitCode.BUSY,

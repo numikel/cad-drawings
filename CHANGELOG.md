@@ -7,6 +7,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.1] - 2026-10-29
+
+Fixes from a field report: an agent drew new geometry on a DWG with its own raw COM script, because `doctor` reported working packages as missing and the skill had no documented way to add content to a DWG. The scenario is now an eval (id 7); the before and after runs are in [docs/measurements.md](docs/measurements.md).
+
+### Added
+
+- **`conventions`:** samples DXF/DWG files or a folder (newest first, `--max-files 20`, `--recursive`) and aggregates units, paper sizes, text styles and heights, layer names and prefixes, block prefixes, title-block blocks and layout name patterns, each with `count` and `of` for the `Source` column of `CAD_CONVENTIONS.md`; layouts without a paper size are counted separately (`layouts_without_paper_size`). With `--allow-com` one CAD instance serves every DWG of the run, started only when a DWG needs converting. A file that cannot be read or converted is skipped with a warning (exit 7). `info` is unchanged.
+- **Drawing helpers in `cadlib.acad`:** `point_array`, `ensure_layer` (creates a missing layer, never changes an existing one) and `load_linetype`, which falls back to language-neutral ISO linetypes (for example `DASHED` to `ACAD_ISO02W100`) and finally to `Continuous`, always with a warning. A project can map its own linetypes in `CAD_CONVENTIONS.md` (new §7 key).
+- **Recipe "add geometry to a DWG"** in `references/com-automation.md`, built only on the public session library; `SKILL.md` routes such tasks there and rules out raw `win32com` start-up code and private helpers.
+- **`doctor`:** `summary.skill_version` and `summary.skill_dir`; an optional `upgrade` field on capabilities that work with an older package.
+- **`plot`:** error code `DEST_LOCKED` (exit 4) when a `--dest` PDF is held by another program, typically the PDF viewer on Windows. The PDFs stay in the run directory and are listed in `outputs`.
+- CI job `min-deps` runs the test suite with the oldest supported package versions (`tests/min-deps.txt`).
+
+### Changed
+
+- **`doctor` version checks:** a package below the recommended version but at or above the required one now counts as working. Required: ezdxf 1.4.0, pywin32 307; recommended: ezdxf 1.4.4, pywin32 312. Before, ezdxf 1.4.3 turned DWG reading, conversion and rendering into `missing`, and pywin32 311 hid COM and proposed installing a CAD application that was already there.
+- **`plot` with a locked `--dest`** ends with `DEST_LOCKED` (exit 4) instead of the catch-all `UNEXPECTED` (exit 1), which was never a documented result. On Linux and macOS a permission error stays a plain error.
+- **COM retries** also treat late-bound `AttributeError: Open.X`, `AttributeError: <ProgID>.X` and the setter form `Property '<name>.X' can not be set.` as transient, not only `<unknown>.X`; such errors failed CAD sessions at random. Because a misspelt member name gives the same message, a named proxy is retried for about 6 seconds and then raised as the original `AttributeError`.
+- `references/com-automation.md`: a measured table of `PlotToFile` with and without the device name and with `RefreshPlotDeviceInfo` (the refresh, not the device name, resets the page setup); examples use the session's document instead of `ActiveDocument`.
+- `references/drafting-standards.md`: text masks must not hide the geometry the sheet exists to show.
+
+### Known limitations
+
+- `conventions` does not collect title-block field labels; it lists the blocks repeated on layouts.
+
 ## [0.3.0] - 2026-10-06
 
 `qa` checks the sheet frame, the text against the frame and the position of a plotted PDF; `measure` joins loose segments into contours. The checks were run on synthetic drawings and on converted sample drawings with their plots; see [docs/measurements.md](docs/measurements.md).

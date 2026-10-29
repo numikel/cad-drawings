@@ -10,6 +10,13 @@ describe what the shipped commands can do: read_dxf, read_dwg, convert (dwg<->dx
 pdf_to_png, and plot_deliverable and edit_dwg, which need a COM-capable CAD host (DXF edits need
 only ezdxf and are covered by read_dxf).
 
+Package versions have two levels. ``REQUIRED_VERSIONS`` is the floor below which the code really
+breaks (CI runs the tests against exactly these, see ``tests/min-deps.txt``); a package below it
+counts as missing. ``RECOMMENDED_VERSIONS`` is what install commands ask for. Between the two the
+package is ``outdated``: everything it serves stays available, the capability gets a ``note`` and
+an ``upgrade`` command (never ``install``), and ``warnings`` carries one line per package.
+``summary.skill_version`` and ``summary.skill_dir`` say which copy of the skill ran.
+
 Exit code: 0 with the matrix, even when capabilities are missing (the matrix is the answer).
 Exit 3 only when the Python interpreter itself is older than 3.10. Exit 2 for bad arguments.
 
@@ -43,7 +50,16 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 MIN_PYTHON = (3, 10)
-MIN_VERSIONS = {"ezdxf": "1.4.4", "pywin32": "312", "pypdfium2": "5", "matplotlib": "3.8"}
+# Floor: below it the code breaks. ezdxf before 1.3.1 has no ezdxf.edgeminer (used by measure)
+# and 1.3.5 fails the sheet-frame tests; pywin32 307 is the oldest release with wheels for every
+# supported Python (306 has none for 3.13).
+REQUIRED_VERSIONS = {"ezdxf": "1.4.0", "pywin32": "307", "pypdfium2": "5", "matplotlib": "3.8"}
+# What install and upgrade commands ask for.
+RECOMMENDED_VERSIONS = {"ezdxf": "1.4.4", "pywin32": "312", "pypdfium2": "5", "matplotlib": "3.8"}
+RECOMMENDED_REASONS = {
+    "ezdxf": "rendering and xref fixes",
+    "pywin32": "fixes a memory leak in long COM sessions",
+}
 # distribution name -> (required for the core skill, only meaningful on Windows)
 PACKAGES: dict[str, tuple[bool, bool]] = {
     "ezdxf": (True, False),
@@ -98,13 +114,35 @@ def installed_packages() -> dict[str, str | None]:
 
 
 def package_state(name: str, version: str | None) -> str:
-    """'missing', 'old' (below the minimum) or 'ok'."""
+    """'missing', 'old' (below the required floor), 'outdated' (works, newer recommended) or 'ok'."""
     if version is None:
         return "missing"
-    minimum = MIN_VERSIONS.get(name)
-    if minimum and not version_at_least(version, minimum):
+    required = REQUIRED_VERSIONS.get(name)
+    if required and not version_at_least(version, required):
         return "old"
+    recommended = RECOMMENDED_VERSIONS.get(name)
+    if recommended and not version_at_least(version, recommended):
+        return "outdated"
     return "ok"
+
+
+def _usable(state: str) -> bool:
+    return state in ("ok", "outdated")
+
+
+def skill_info() -> dict[str, str]:
+    """Version and directory of this copy of the skill (reads a file; imports nothing heavy)."""
+    here = Path(__file__).resolve().parent
+    info: dict[str, str] = {}
+    try:
+        text = (here / "cadlib" / "__init__.py").read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    if match := re.search(r'^__version__\s*=\s*"([^"]+)"', text, re.MULTILINE):
+        info["skill_version"] = match.group(1)
+    if (here.parent / "SKILL.md").is_file():
+        info["skill_dir"] = str(here.parent)
+    return info
 
 
 # --------------------------------------------------------------------------------------
@@ -145,22 +183,25 @@ def install_options(platform: str | None = None) -> dict[str, list[str]]:
         "linux": ["No COM on Linux; use ODA File Converter instead"],
     }[key]
     return {
-        "ezdxf": [f'{pip} "ezdxf>={MIN_VERSIONS["ezdxf"]}"'],
-        "pypdfium2": [f'{pip} "pypdfium2>={MIN_VERSIONS["pypdfium2"]}"'],
-        "pywin32": [f'{pip} "pywin32>={MIN_VERSIONS["pywin32"]}"'],
+        "ezdxf": [f'{pip} "ezdxf>={RECOMMENDED_VERSIONS["ezdxf"]}"'],
+        "pypdfium2": [f'{pip} "pypdfium2>={RECOMMENDED_VERSIONS["pypdfium2"]}"'],
+        "pywin32": [f'{pip} "pywin32>={RECOMMENDED_VERSIONS["pywin32"]}"'],
         "oda": oda,
         "libredwg": libredwg,
         "cad": cad,
     }
 
 
-def pip_install(names: Sequence[str], platform: str | None = None) -> list[str]:
-    """One ``pip install`` command for the given distributions (minimum versions applied)."""
+def pip_install(
+    names: Sequence[str], platform: str | None = None, *, upgrade: bool = False
+) -> list[str]:
+    """One ``pip install`` command for the given distributions (recommended versions applied)."""
     if not names:
         return []
     py = "python" if _platform_key(platform) == "win32" else "python3"
-    specs = [f'"{n}>={MIN_VERSIONS[n]}"' if n in MIN_VERSIONS else n for n in names]
-    return [f"{py} -m pip install " + " ".join(specs)]
+    specs = [f'"{n}>={RECOMMENDED_VERSIONS[n]}"' if n in RECOMMENDED_VERSIONS else n for n in names]
+    flag = "--upgrade " if upgrade else ""
+    return [f"{py} -m pip install {flag}" + " ".join(specs)]
 
 
 def converter_install_hint(platform: str | None = None) -> str:
@@ -569,6 +610,30 @@ def gather_environment(*, probe_com: bool = False) -> Environment:
     return env
 
 
+def _recommendation(name: str) -> str:
+    reason = RECOMMENDED_REASONS.get(name)
+    return f"{name} {RECOMMENDED_VERSIONS[name]} or newer is recommended" + (
+        f" ({reason})" if reason else ""
+    )
+
+
+# Packages each capability relies on, besides pywin32 for the COM paths
+_CAPABILITY_PACKAGES: dict[str, tuple[str, ...]] = {
+    "read_dxf": ("ezdxf",),
+    "read_dwg": ("ezdxf",),
+    "convert": ("ezdxf",),
+    "render": ("ezdxf", "pillow", "matplotlib", "pypdfium2"),
+    "pdf_to_png": ("pypdfium2",),
+}
+
+
+def _capability_packages(name: str, cap: dict[str, Any]) -> list[str]:
+    packages = list(_CAPABILITY_PACKAGES.get(name, ()))
+    if "com" in (cap.get("via") or ""):
+        packages.append("pywin32")
+    return packages
+
+
 def _cap(
     status: str, via: str | None, install: list[str] | None = None, note: str | None = None
 ) -> dict[str, Any]:
@@ -581,7 +646,7 @@ def _cap(
 
 
 def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
-    """Build ``summary`` and warnings from an environment snapshot (pure, no I/O)."""
+    """Build ``summary`` and warnings from an environment snapshot (reads only the skill's version)."""
     opts = install_options(env.platform)
     pk = env.packages
     ezdxf_state = package_state("ezdxf", pk.get("ezdxf"))
@@ -589,27 +654,29 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
     pywin_state = package_state("pywin32", pk.get("pywin32"))
     host = next((h for h in env.hosts if h.get("exe_exists")), None)
     com_host = bool(host) and env.platform == "win32"
-    com_ready = com_host and pywin_state == "ok"
+    com_ready = com_host and _usable(pywin_state)
+    # With a registered host the missing piece is pywin32, never the CAD application itself
+    com_install = opts["pywin32"] if com_host else (opts["cad"] if env.platform == "win32" else [])
     oda_ok = bool(env.oda) and (env.platform != "linux" or bool(env.xvfb) or env.display)
     warnings: list[str] = []
 
-    ez_install = opts["ezdxf"] if ezdxf_state != "ok" else []
+    ez_install = opts["ezdxf"] if not _usable(ezdxf_state) else []
     caps: dict[str, Any] = {}
     caps["read_dxf"] = (
         _cap(STATUS_AVAILABLE, "ezdxf")
-        if ezdxf_state == "ok"
+        if _usable(ezdxf_state)
         else _cap(
             STATUS_DEGRADED if ezdxf_state == "old" else STATUS_MISSING,
             "ezdxf",
             ez_install,
-            f"ezdxf {pk.get('ezdxf')} is below {MIN_VERSIONS['ezdxf']}"
+            f"ezdxf {pk.get('ezdxf')} is below the required {REQUIRED_VERSIONS['ezdxf']}"
             if ezdxf_state == "old"
             else None,
         )
     )
 
     # DWG -> DXF conversion: COM, then ODA, then LibreDWG
-    if ezdxf_state != "ok":
+    if not _usable(ezdxf_state):
         caps["read_dwg"] = _cap(
             STATUS_MISSING, None, ez_install, "needs ezdxf to read the converted DXF"
         )
@@ -626,19 +693,24 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
             STATUS_DEGRADED, "libredwg", opts["oda"], "approximate: some objects may be dropped"
         )
     else:
-        install = (opts["cad"] if env.platform == "win32" else []) + opts["oda"] + opts["libredwg"]
+        install = com_install + opts["oda"] + opts["libredwg"]
         note = "ODA File Converter needs a display (Xvfb)" if env.oda and not oda_ok else None
         caps["read_dwg"] = _cap(STATUS_MISSING, None, install, note)
-    if com_host and pywin_state != "ok":
-        warnings.append(f"CAD host registered but pywin32 is {pywin_state}; COM is unavailable")
+    if com_host and not _usable(pywin_state):
+        why = (
+            "pywin32 is not installed"
+            if pywin_state == "missing"
+            else f"pywin32 {pk.get('pywin32')} is below the required {REQUIRED_VERSIONS['pywin32']}"
+        )
+        warnings.append(f"CAD host registered but {why}; COM is unavailable")
         caps["read_dwg"].setdefault("install", opts["pywin32"])
 
     # render for viewing: the ezdxf path needs ezdxf + Pillow + matplotlib; PDF -> PNG (and the
     # COM path) needs pypdfium2
     draw_missing = [
-        n for n in ("ezdxf", "pillow", "matplotlib") if package_state(n, pk.get(n)) != "ok"
+        n for n in ("ezdxf", "pillow", "matplotlib") if not _usable(package_state(n, pk.get(n)))
     ]
-    pdf_ok = pdfium_state == "ok"
+    pdf_ok = _usable(pdfium_state)
     if not draw_missing and pdf_ok:
         caps["render"] = (
             _cap(STATUS_AVAILABLE, "com+pypdfium2")
@@ -686,16 +758,16 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
                 note="starts a CAD instance: ask the user, then use --allow-com",
             )
         else:
-            caps[name] = _cap(
-                STATUS_MISSING,
-                None,
-                (opts["cad"] if env.platform == "win32" else []),
-                f"{what} needs Windows and a COM-capable CAD application (AutoCAD, BricsCAD, ...)",
+            note = (
+                f"a CAD host is registered; {what} also needs pywin32 for COM"
+                if com_host
+                else f"{what} needs Windows and a COM-capable CAD application (AutoCAD, BricsCAD, ...)"
             )
+            caps[name] = _cap(STATUS_MISSING, None, com_install, note)
 
     caps["pdf_to_png"] = (
         _cap(STATUS_AVAILABLE, "pypdfium2")
-        if pdfium_state == "ok"
+        if _usable(pdfium_state)
         else _cap(
             STATUS_MISSING if pdfium_state == "missing" else STATUS_DEGRADED,
             None,
@@ -703,17 +775,36 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         )
     )
 
+    # packages that work but are older than recommended: notes, upgrade commands, one warning each
+    outdated = [
+        name
+        for name in RECOMMENDED_VERSIONS
+        if (env.platform == "win32" or name != "pywin32")
+        and package_state(name, pk.get(name)) == "outdated"
+    ]
+    for name in outdated:
+        warnings.append(f"{name} {pk[name]} works, but {_recommendation(name)}")
+    for cap_name, cap in caps.items():
+        if cap["status"] == STATUS_MISSING:
+            continue
+        hit = [n for n in _capability_packages(cap_name, cap) if n in outdated]
+        if hit:
+            text = "; ".join(f"works with {n} {pk[n]}; {_recommendation(n)}" for n in hit)
+            cap["note"] = f"{cap['note']}; {text}" if cap.get("note") else text
+            cap["upgrade"] = pip_install(hit, env.platform, upgrade=True)
+
     packages = {}
     for name, (_required, windows_only) in PACKAGES.items():
         if windows_only and env.platform != "win32":
             continue
         state = package_state(name, pk.get(name))
-        minimum = MIN_VERSIONS.get(name)
         packages[name] = (
             "missing"
             if state == "missing"
-            else f"{pk[name]} (below {minimum})"
+            else f"{pk[name]} (below {REQUIRED_VERSIONS[name]})"
             if state == "old"
+            else f"{pk[name]} ({RECOMMENDED_VERSIONS[name]} recommended)"
+            if state == "outdated"
             else str(pk[name])
         )
     if pk.get("pymupdf"):
@@ -726,6 +817,7 @@ def assess(env: Environment) -> tuple[dict[str, Any], list[str]]:
         warnings.append(f"only {env.free_gb} GB free on the temp drive")
 
     summary: dict[str, Any] = {
+        **skill_info(),
         "platform": env.platform,
         "python": ".".join(str(n) for n in env.python),
         "packages": packages,

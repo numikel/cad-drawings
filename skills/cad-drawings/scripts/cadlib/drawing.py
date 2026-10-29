@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import ezdxf
 import ezdxf.bbox
@@ -65,10 +65,13 @@ def open_drawing(
     *,
     allow_com: bool = False,
     prefer: str | None = None,
+    session: Any = None,
 ) -> Loaded:
     """Open a DXF or DWG. A DWG goes through ``convert.ensure_dxf`` (the one conversion and
     cache pipeline); a CAD application is used only with ``allow_com`` or ``prefer="com"``.
-    Every warning of the conversion is kept in ``Loaded.warnings``."""
+    ``session`` (an ``AcadSession`` or a stand-in) is reused for the conversion and left
+    running, so a caller reading many DWGs starts CAD once. Every warning of the conversion is
+    kept in ``Loaded.warnings``."""
     src = _resolve_source(path)
     suffix = src.suffix.lower()
     warnings: list[str] = []
@@ -80,7 +83,8 @@ def open_drawing(
         )
     from . import convert
 
-    made = convert.ensure_dxf(src, ctx, allow_com=allow_com, prefer=prefer)
+    shared = {"session": session} if session is not None else {}
+    made = convert.ensure_dxf(src, ctx, allow_com=allow_com, prefer=prefer, **shared)
     warnings.extend(made.warnings)
     if made.approximate and not any("approximate" in w.lower() for w in warnings):
         warnings.append(

@@ -9,7 +9,7 @@ Regenerate
 ----------
     python evals/make_fixtures.py --out <dir> [--large]
 
-Requires ezdxf (>= 1.4.4). Without --out the files go to evals/fixtures/ next to the script.
+Requires ezdxf (>= 1.4.0; 1.4.4 recommended). Without --out the files go to evals/fixtures/ next to the script.
 --large also writes plan_large.dxf (about 30 000 entities, roughly 5 MB, a few seconds).
 
 The output is deterministic: same arguments, byte-identical files (fixed seed, fixed

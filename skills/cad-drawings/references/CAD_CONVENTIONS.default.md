@@ -76,6 +76,7 @@ DEFAULTS, NOT PROJECT RULES. Derived from ISO drafting standards and common CAD 
 ## 7. Lines and plot styles
 - **Line groups; lineweight per layer or use**: narrow/wide/extra-wide 0.25/0.5/1.0 on A1–A0, 0.18/0.35/0.7 on A3–A2; per layer as in §5 [norm: ISO 128-2:2022 §5.1; practice]
 - **Linetypes and linetype scaling**: ISO linetypes scaled relative to paper so patterns plot the same in every viewport [norm: ISO 128-2 §5.3; practice]
+- **Linetypes: requested name → name to use → .lin file**: DASHED, HIDDEN → ACAD_ISO02W100 · CENTER → ACAD_ISO04W100 · DASHDOT → ACAD_ISO10W100 · PHANTOM → ACAD_ISO05W100, all from acadiso.lin (acad.lin as second file); tried when the requested name does not load, e.g. on a localized CAD; last resort Continuous, reported to the user [practice]
 - **Plot style table (CTB / STB file) and colour policy**: monochrome, lineweight from the layer (AutoCAD-family example: monochrome.ctb); colour only where it carries meaning [practice]
 
 ## 8. Layouts and viewports

@@ -13,6 +13,7 @@ MODULES = (
     "qa",
     "measure",
     "register",
+    "conventions",
 )
 
 # Which module provides which command. Used only to build "missing dependency" stand-ins when a
@@ -32,6 +33,7 @@ COMMAND_MODULES = {
     "qa": "qa",
     "measure": "measure",
     "register": "register",
+    "conventions": "conventions",
 }
 
-__version__ = "0.3.0"
+__version__ = "0.4.0-rc.1"

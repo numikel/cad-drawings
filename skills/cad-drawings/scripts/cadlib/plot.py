@@ -15,6 +15,7 @@ import contextlib
 import json
 import re
 import shutil
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -202,16 +203,49 @@ def _copier(src: Path) -> Callable[[Path], None]:
     return copy
 
 
-def _copy_to_dest(dest: Path, files: list[Path], overwrite: bool) -> list[str]:
-    """Copy PDFs into ``dest`` (temp file + replace); returns the written names."""
+_LOCK_WINERRORS = (5, 32, 33)  # access denied, sharing violation, lock violation
+
+
+def _is_locked(exc: OSError, dest: Path) -> bool:
+    """A refused replace because another process holds the target (typically a PDF viewer).
+
+    Only Windows locks open files: there ``os.replace`` raises ``PermissionError`` with WinError 5
+    or 32/33 while a viewer has the target open. Elsewhere a ``PermissionError`` is a real
+    permission problem and stays a plain error. An error about a file outside ``dest`` (the
+    run-directory PDF being read) is not a held target either.
+    """
+    named = [Path(n) for n in (exc.filename, exc.filename2) if n]
+    if named and not any(p.parent == dest for p in named):
+        return False
+    if getattr(exc, "winerror", None) in _LOCK_WINERRORS:
+        return True
+    return sys.platform == "win32" and isinstance(exc, PermissionError)
+
+
+def _copy_to_dest(
+    dest: Path, files: list[Path], overwrite: bool, written: list[str] | None = None
+) -> list[str]:
+    """Copy PDFs into ``dest`` (temp file + replace); returns the written names.
+
+    ``written`` is filled as files are copied, so a caller that catches the error still knows
+    what reached ``dest``. A target held by another process raises ``DEST_LOCKED``.
+    """
     names = [f.name for f in files]
     _check_dest(dest, names, overwrite)  # again: the folder may have changed while CAD ran
     dest.mkdir(parents=True, exist_ok=True)
-    written: list[str] = []
+    written = [] if written is None else written
     for src in files:
         try:
             atomic_write(dest / src.name, _copier(src))
         except OSError as exc:
+            if _is_locked(exc, dest):
+                raise CadError(
+                    "DEST_LOCKED",
+                    f"cannot replace {src.name} in {dest}: it is open in another program or "
+                    f"read-only (copied {len(written)} of {len(files)} file(s)): {exc}",
+                    hint="close the file in the PDF viewer and rerun with --overwrite, or pass "
+                    "another --dest; the PDF is kept in the run directory",
+                ) from exc
             raise CadError(
                 "UNEXPECTED",
                 f"copy to {dest} failed after {len(written)} file(s): {exc}",
@@ -311,9 +345,19 @@ def _run_plot(args: argparse.Namespace) -> Result:
     if not plots:
         raise first_error or stopped or CadError("PLOT_FAILED", "nothing was plotted")
     copied: list[str] = []
+    dest_error: CadError | None = None
     if dest is not None:
-        copied = _copy_to_dest(dest, [Path(p["pdf"]) for p in plots], args.overwrite)
-    return _finish(result, ctx, source, plots, failed, not_plotted, stopped, dest, copied)
+        try:
+            _copy_to_dest(dest, [Path(p["pdf"]) for p in plots], args.overwrite, copied)
+        except CadError as err:
+            if err.code != "DEST_LOCKED":
+                raise
+            # a held target must not hide the finished PDFs: report them and plot.json too
+            ctx.log(f"copy to {dest} failed: {err.code}: {err.message}")
+            dest_error = err
+    return _finish(
+        result, ctx, source, plots, failed, not_plotted, stopped, dest, copied, dest_error
+    )
 
 
 def _finish(
@@ -326,6 +370,7 @@ def _finish(
     stopped: CadError | None,
     dest: Path | None,
     copied: list[str],
+    dest_error: CadError | None = None,
 ) -> Result:
     report = {
         "source": str(source),
@@ -359,6 +404,10 @@ def _finish(
     if failed or not_plotted or stopped is not None:
         result.exit_code = ExitCode.PARTIAL
         result.next.append("the PDFs that succeeded are listed in outputs; see plot.json")
+    if dest_error is not None:
+        result.add_error(dest_error)
+        result.exit_code = dest_error.exit_code  # the actionable problem wins over PARTIAL
+        result.next.append("the PDFs are in the run directory and listed in outputs")
     ctx.bind(result)
     ctx.finish()
     return result
@@ -407,8 +456,9 @@ COMMANDS = {
             "examples:\n"
             "  cad.py plot plan.dwg --allow-com --layout Sheet-A --scale fit --dest out\n"
             "  cad.py plot plan.dwg --allow-com --media 'ISO_A3_(420.00_x_297.00_MM)'\n"
-            "exit codes: 0 ok, 2 bad arguments, 3 no consent or CAD, 6 target exists or "
-            "nothing to plot, 7 some layouts failed"
+            "exit codes: 0 ok, 2 bad arguments, 3 no consent or CAD, 4 --dest file held by "
+            "another program (DEST_LOCKED), 6 target exists or nothing to plot, 7 some layouts "
+            "failed"
         ),
     ),
 }

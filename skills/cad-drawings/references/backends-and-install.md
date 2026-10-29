@@ -16,13 +16,15 @@ Read this when `doctor` reports missing components and you need to know what eac
 
 ## Python packages (via pip or uv)
 
+Each versioned package has two levels. The **required** version is the oldest one the skill is tested against (the CI job `min-deps` runs the whole test suite with exactly these); below it the package counts as missing. The **recommended** version is what install commands ask for. A package between the two works: `doctor` keeps the capabilities available, adds a `note` and an `upgrade` command to the capabilities that use it, and puts one line in `warnings`. Upgrade only when the user agrees; nothing in the skill installs packages on its own. `install` is reserved for what is really missing.
+
 ### Always present (required dependencies)
 
-**ezdxf 1.4.4+**
+**ezdxf 1.4.0+ (1.4.4 recommended)**
 - What: Read and query DXF and DWG files; render to PNG without CAD
-- Install: `pip install ezdxf>=1.4.4` (included in the skill environment)
+- Install: `pip install "ezdxf>=1.4.4"` (included in the skill environment)
 - License: MIT
-- Minimum: 1.4.4 (check: `python -c "import ezdxf; print(ezdxf.__version__)"`)
+- Required: 1.4.0. Before 1.3.1 `ezdxf.edgeminer`, which `measure` imports, does not exist; with 1.3.5 the sheet frame is not found when it is an old-style (heavy) polyline. Recommended: 1.4.4 (rendering and xref fixes). Check: `python -c "import ezdxf; print(ezdxf.__version__)"`
 
 **pypdfium2 5.0+**
 - What: Convert PDF to PNG for viewing (default backend, fastest)
@@ -40,12 +42,14 @@ Read this when `doctor` reports missing components and you need to know what eac
 
 ### Windows only
 
-**pywin32 312+**
+**pywin32 307+ (312 recommended)**
 - What: COM automation (required for AutoCAD, BricsCAD, ZWCAD, GstarCAD on Windows)
-- Install: `pip install pywin32>=312` (included in the skill environment)
+- Install: `pip install "pywin32>=312"` (included in the skill environment)
 - License: PSF / BSD
 - Check: `python -c "import win32com; print(win32com.__version__)"`
-- Version 312 fixed a memory leak in variant transfers; use 312 or newer
+- Required: 307, the oldest release that installs on every supported Python (306 has no wheel for Python 3.13). COM works with 307 to 311.
+- Recommended: 312, which fixes a memory leak in variant transfers; it matters in long COM sessions, so `doctor` suggests the upgrade but does not treat 307 to 311 as broken
+- A registered CAD host is never a reason to install a CAD application: when COM is unavailable the missing piece is pywin32
 
 ### Optional (loaded only if present)
 
@@ -186,12 +190,13 @@ If a step refuses, the next step is tried. If all steps refuse, the command exit
 
 ## Version and compatibility notes
 
-| Component | Minimum | Tested | Notes |
+| Component | Required | Recommended | Notes |
 |---|---|---|---|
 | Python | 3.10 | 3.13 | Type hints, modern standard library |
-| ezdxf | 1.4.4 | 1.4.4+ | Do not use older versions; APIs changed |
-| pypdfium2 | 5.0 | 5.0+ | Wheel includes all dependencies |
-| pywin32 | 312 | 312+ | 311 and earlier have memory leak |
+| ezdxf | 1.4.0 | 1.4.4 | Older releases lack `ezdxf.edgeminer` or fail frame detection; 1.4.4 adds rendering and xref fixes |
+| pypdfium2 | 5.0 | 5.0 | Wheel includes all dependencies |
+| matplotlib | 3.8 | 3.8 | Needed by the ezdxf rendering path |
+| pywin32 | 307 | 312 | 311 and earlier leak memory in long COM sessions, but work |
 | ODA File Converter | 27.0 | 27.1 | Check for newer releases |
 | LibreDWG | 0.13 | 0.14 | Use 0.14+ for 11 CVE fixes |
 | AutoCAD | 2020 | 2024 | Older versions may lack some APIs |

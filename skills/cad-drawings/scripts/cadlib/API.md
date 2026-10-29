@@ -221,3 +221,67 @@ Written by the main context before the F2 tracks start. Decisions already taken 
 | main | `result.py`, `cad.py`, `__init__.py`, `convert.py` (cache warning), `conftest.py`, this file |
 
 COM tests in different tracks run concurrently on one machine: use the `com_exclusive` mechanism (tests marked `com` wait for the machine-wide lock automatically via `conftest.py`); never start CAD outside a test that holds it.
+
+## 0.4.0 contract: doctor versions, drawing helpers, locked destination, `conventions`
+
+Written by the main context before the 0.4.0 tracks start. Background: a field report showed an agent bypassing the skill because `doctor` reported working packages as missing, and because adding new geometry to a DWG had no documented path.
+
+### doctor (track A)
+- Two version tables in `scripts/doctor.py`: `REQUIRED_VERSIONS` (below it the code really breaks; the floor is what the CI job `min-deps` passes, pinned in `tests/min-deps.txt`) and `RECOMMENDED_VERSIONS` (ezdxf 1.4.4, pywin32 312, pypdfium2 5, matplotlib 3.8 unless evidence says otherwise). `REQUIRED <= RECOMMENDED` for every package.
+- `package_state()` returns `missing | old | outdated | ok`: `old` = below required (treated as missing, as today), `outdated` = between required and recommended (works).
+- A capability that depends only on `ok`/`outdated` packages is `available` (or whatever it would be with `ok`). When an `outdated` package is involved it gains `note: "works with <pkg> <v>; <rec> or newer is recommended (<reason>)"` and a new optional field `upgrade: [<pip command>]`. `install` stays reserved for missing/degraded capabilities. One line per outdated package in `summary.warnings`.
+- `com_ready` = a COM host is registered and pywin32 is `ok` or `outdated`. Never propose installing a CAD application when a host is registered; propose the pywin32 install instead when pywin32 is below the floor or missing.
+- `summary.skill_version` (from `cadlib.__version__`, read without importing ezdxf) and `summary.skill_dir` (absolute path of the skill directory).
+- Status values stay `available | degraded | missing` (no new value).
+
+### acad.py drawing helpers (track B)
+```python
+LINETYPE_FILES: tuple[str, ...] = ("acadiso.lin", "acad.lin")
+LINETYPE_FALLBACKS: dict[str, tuple[str, ...]]
+
+
+def point_array(points: Iterable[Sequence[float]], *, dims: int = 2) -> Any: ...
+
+
+def load_linetype(
+    doc: Doc,
+    name: str,
+    *,
+    mapping: Mapping[str, Sequence[str]] | None = None,
+    files: Sequence[str] = LINETYPE_FILES,
+) -> tuple[str, list[str]]: ...
+
+
+def ensure_layer(
+    doc: Doc,
+    name: str,
+    *,
+    color: int | None = None,
+    linetype: str | None = None,
+    mapping: Mapping[str, Sequence[str]] | None = None,
+) -> list[str]: ...
+```
+- `LINETYPE_FALLBACKS` maps an upper-case request to language-neutral ISO names, e.g. `DASHED` and `HIDDEN` -> `ACAD_ISO02W100`, `CENTER` -> `ACAD_ISO04W100`, `DASHDOT` -> `ACAD_ISO10W100`, `PHANTOM` -> `ACAD_ISO05W100`.
+- `point_array` returns a flattened `VARIANT(VT_ARRAY | VT_R8)`: `dims=2` for `AddLightWeightPolyline`, 3 for `AddLine`/`AddPolyline` points.
+- `load_linetype` returns (name actually available in the document, warnings). Order: already in `doc.raw.Linetypes` -> load `name` from each file -> each name in `mapping[name]` (the user's `CAD_CONVENTIONS.md`, tried before the defaults) -> `LINETYPE_FALLBACKS` -> `Continuous`. Every substitution adds a warning naming both linetypes; the caller must pass it on to the user. It never raises for an unavailable linetype.
+- `ensure_layer` creates a missing layer (ACI colour, linetype through `load_linetype`) and never modifies an existing layer (minimal diff); it returns warnings, including one when an existing layer's colour or linetype differs.
+`references/com-automation.md` gets a public recipe built only from these and `AcadSession`/`RunContext`: absolute skill path on `sys.path`, a script name that is not a standard-library module, `RunContext.create` + `stage_copy`, `with AcadSession.start() as session:` -> `session.open(copy, readonly=False)` -> helpers -> `AddLightWeightPolyline(point_array(...))`, `AddMText` -> `session.save_dwg(doc, dst)` (closes the document); leave the `with` block, then `cad.py plot <dst> --layout <name> --allow-com`. No raw `DispatchEx`, `Dispatch` or `GetActiveObject` in any code block.
+
+### plot (track C)
+- A `--dest` that cannot be replaced because another process holds it (Windows `PermissionError`/WinError 32, e.g. a PDF viewer) raises `DEST_LOCKED` (exit 4, BUSY) with hint `close the file in the PDF viewer and rerun with --overwrite, or pass another --dest; the PDF is kept in the run directory`. The result keeps `outputs` and `plot.json` (run-dir PDFs stay listed).
+
+### conventions (track D) — command `conventions`
+`conventions PATH [PATH ...] [--max-files 20] [--recursive] [conversion flags as info: --allow-com, --backend] [common flags]`
+- Module `cadlib.conventions` (new; `info` and `dxf.py` stay unchanged). PATH is a DXF/DWG file or a folder (`*.dxf`, `*.dwg`, top level unless `--recursive`). Files are taken newest first (mtime) up to `--max-files`; the rest is counted as `not_sampled`.
+- Per file it reuses `open_drawing` and `drawing_info._conventions`/`build_info`. A DWG that cannot be converted (no converter, no `--allow-com`) is skipped with a warning, not an error.
+- `conventions.json`: `files` (per file: name, ok, error), and aggregates with counts over the sampled files: units (`$INSUNITS`/`$MEASUREMENT`), layout paper sizes, text styles and heights, layer names, title-block field labels, naming patterns. Each aggregate entry carries `count` and `of` so it can go straight into the `Source` column of `CAD_CONVENTIONS.md` (`inferred: 41 of 44 layouts use A1`).
+- Summary (< 4 KB): `sampled`, `skipped`, `not_sampled`, and the top entries of each aggregate. Exit 0; 7 (`PARTIAL`, existing semantics) when some files were skipped; an error code only when no file could be read.
+
+### Ownership for 0.4.0
+| Track | Files |
+|---|---|
+| A | `scripts/doctor.py`, `tests/test_doctor.py`, `tests/min-deps.txt`, `.github/workflows/ci.yml`, `references/backends-and-install.md`, `README.md` |
+| B | `cadlib/acad.py`, `tests/test_acad.py`, `references/com-automation.md`, `references/cad-conventions-template.md`, `references/CAD_CONVENTIONS.default.md`, `tests/test_skill_package.py` (recipe test only) |
+| C | `cadlib/plot.py`, `tests/test_plot.py`, `references/plotting.md` |
+| D | `cadlib/conventions.py`, `tests/test_conventions.py` |
+| main | `result.py`, `__init__.py`, `cad.py`, this file, `SKILL.md`, `references/drafting-standards.md`, `evals/`, `docs/measurements.md`, `CHANGELOG.md`, version files |
