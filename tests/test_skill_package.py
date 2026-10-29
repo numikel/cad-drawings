@@ -348,6 +348,24 @@ def test_shell_invocations_go_through_python(doc_files: dict[Path, str]) -> None
     assert not bad, f"scripts must be started as `python <script>`: {bad}"
 
 
+RAW_DISPATCH = ("DispatchEx(", "Dispatch(", "GetActiveObject(")
+
+
+def test_com_recipe_has_no_raw_dispatch() -> None:
+    """The COM reference teaches the session library, never raw COM start-up calls."""
+    text = (SKILL / "references" / "com-automation.md").read_text(encoding="utf-8")
+    offenders = [
+        f"{token} in: {line.strip()}"
+        for _lang, lines in _fenced_blocks(text)
+        for line in lines
+        for token in RAW_DISPATCH
+        if token in line
+    ]
+    assert not offenders, f"raw COM start-up in a code block: {offenders}"
+    for needle in ("AcadSession.start", "stage_copy", "load_linetype", "cad.py plot"):
+        assert needle in text, f"the recipe must mention {needle!r}"
+
+
 def test_listed_commands_are_registered(skill_text: str, commands: dict[str, Any]) -> None:
     unknown = sorted(
         {
@@ -423,7 +441,7 @@ def test_evals_json_structure(fixtures_dir: Path) -> None:
     data = _load_json("evals.json")
     assert data["skill_name"] == SKILL.name
     evals = data["evals"]
-    assert [e["id"] for e in evals] == list(range(1, len(evals) + 1)) and len(evals) == 6
+    assert [e["id"] for e in evals] == list(range(1, len(evals) + 1)) and len(evals) == 7
     catalog = set(data["mechanical_check_catalog"])
     for e in evals:
         assert e["prompt"].strip() and e["expected_output"].strip(), e["id"]

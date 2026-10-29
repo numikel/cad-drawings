@@ -10,7 +10,8 @@ Design rules, each one the answer to a failure seen in practice:
 * **Late binding only** (``win32com.client.dynamic``): no ``gen_py`` cache is built.
 * **Retry wraps the whole expression**, classified by HRESULT, never by localized message text
   (``retry``/``retry_expr``). Transient: ``RPC_E_CALL_REJECTED``, ``RPC_E_SERVERCALL_RETRYLATER``
-  and late-binding ``AttributeError: <unknown>.X``. Everything else from COM is permanent and
+  and late-binding ``AttributeError: <name>.X`` (``<unknown>``, the method that returned the
+  proxy such as ``Open``, or the ProgID). Everything else from COM is permanent and
   becomes ``ComError`` (``CadError`` code ``COM_ERROR``) carrying the HRESULT and, when present,
   the host's own sub-code.
 * **Quit is asynchronous** and can hang after a failed plot: ``quit`` re-wraps the application
@@ -48,6 +49,7 @@ from __future__ import annotations
 
 import contextlib
 import csv
+import math
 import os
 import re
 import subprocess
@@ -56,7 +58,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeVar
@@ -247,6 +249,29 @@ def excepinfo_code(exc: BaseException) -> int | None:
     return None
 
 
+# win32com's dynamic proxy reports a member it cannot resolve as "<proxy name>.<member>" (get)
+# or "Property '<proxy name>.<member>' can not be set." (set): the name is "<unknown>", the
+# method that returned the proxy ("Open") or the ProgID. While CAD is busy or the proxy went
+# stale this is transient. Python's own messages ("'X' object has no attribute 'y'") differ.
+_LATE_BOUND_NAME = r"(?:<unknown>|[A-Za-z_][\w.]*)\.[A-Za-z_]\w*"
+_LATE_BOUND_MESSAGE = re.compile(
+    rf"^(?:{_LATE_BOUND_NAME}|Property '{_LATE_BOUND_NAME}' can not be set\.)$"
+)
+
+
+def _late_bound(exc: BaseException) -> bool:
+    return isinstance(exc, AttributeError) and bool(_LATE_BOUND_MESSAGE.match(str(exc)))
+
+
+# A named proxy ("Open.X", "ModelSpace.X") gives the same message for a busy CAD and for a typo in
+# the member name, so it gets a short retry budget (about 6 s) and then surfaces as itself.
+LATE_BOUND_TRIES = 5
+
+
+def _named_late_bound(exc: BaseException) -> bool:
+    return _late_bound(exc) and "<unknown>" not in str(exc)
+
+
 def classify(exc: BaseException) -> str:
     """'transient' (retry), 'permanent' (COM failure) or 'other' (not a COM problem)."""
     if isinstance(exc, CadError):
@@ -256,7 +281,7 @@ def classify(exc: BaseException) -> str:
         if hresult in TRANSIENT_HRESULTS or excepinfo_code(exc) in TRANSIENT_HRESULTS:
             return "transient"
         return "permanent"
-    if isinstance(exc, AttributeError) and "<unknown>" in str(exc):
+    if _late_bound(exc):
         return "transient"  # late-binding proxy that is not ready or went stale
     return "other"
 
@@ -291,7 +316,9 @@ def retry(
     This wraps the WHOLE call. ``retry(doc.Blocks.Item, i)`` evaluates ``doc.Blocks`` before
     retry starts, so for chained access use ``retry_expr(lambda: doc.Blocks.Item(i))``.
     Permanent COM failures raise ``ComError`` at once; non-COM exceptions propagate unchanged;
-    running out of tries raises ``CadError("COM_TRANSIENT")``.
+    running out of tries raises ``CadError("COM_TRANSIENT")``. A late-bound ``AttributeError``
+    on a named proxy is retried at most ``LATE_BOUND_TRIES`` times and then re-raised as is,
+    because a misspelt member name produces the same message.
     """
     last: BaseException | None = None
     for attempt in range(max(1, tries)):
@@ -303,6 +330,8 @@ def retry(
                 raise
             if kind == "permanent":
                 raise _com_error(exc) from exc
+            if _named_late_bound(exc) and attempt >= min(tries, LATE_BOUND_TRIES) - 1:
+                raise
             last = exc
             if attempt < tries - 1:
                 _sleep(backoff_delay(attempt, base_delay, max_delay))
@@ -627,6 +656,237 @@ class _FreshLayout:
 def _double_array(values: tuple[float, ...]) -> Any:
     com = _com()
     return com.client.VARIANT(com.pythoncom.VT_ARRAY | com.pythoncom.VT_R8, list(values))
+
+
+# --- drawing helpers: point arrays, linetypes, layers ------------------------------------------
+# Public helpers for code that ADDS geometry to a DWG through ``Doc.raw`` (see the recipe in
+# references/com-automation.md). They never start CAD; every COM access goes through retry_expr.
+LINETYPE_FILES: tuple[str, ...] = ("acadiso.lin", "acad.lin")
+# Requested (upper-case) name -> language-neutral ISO names to try when it cannot be loaded.
+# A localized CAD may know "DASHED" only under another name while ACAD_ISO02W100 always loads.
+LINETYPE_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "DASHED": ("ACAD_ISO02W100",),
+    "HIDDEN": ("ACAD_ISO02W100",),
+    "CENTER": ("ACAD_ISO04W100",),
+    "DASHDOT": ("ACAD_ISO10W100",),
+    "PHANTOM": ("ACAD_ISO05W100",),
+}
+_BUILTIN_LINETYPES = frozenset({"CONTINUOUS", "BYLAYER", "BYBLOCK"})  # always in the table
+_LAYER_NAME_FORBIDDEN = frozenset('<>/\\":;?*|=`,')
+_MAX_LAYER_NAME = 255
+
+
+def _bad_args(message: str, hint: str | None = None) -> CadError:
+    return CadError("BAD_ARGS", message, exit_code=ExitCode.BAD_ARGS, hint=hint)
+
+
+def point_array(points: Iterable[Sequence[float]], *, dims: int = 2) -> Any:
+    """Flatten points into the double-array VARIANT that COM drawing methods expect.
+
+    Args:
+        points: Vertices as ``(x, y)`` or ``(x, y, z)`` sequences, all of the same size.
+        dims: 2 for ``AddLightWeightPolyline``, 3 for ``AddLine``, ``AddPolyline``, ``AddMText``
+            and other methods that take 3D points.
+
+    Returns:
+        A ``VARIANT(VT_ARRAY | VT_R8)``.
+
+    Raises:
+        CadError: ``BAD_ARGS`` for no points, a point of the wrong size, or a non-finite or
+            non-numeric coordinate; the message names the offending point.
+    """
+    if dims not in (2, 3):
+        raise _bad_args(f"dims must be 2 or 3, got {dims!r}")
+    flat: list[float] = []
+    for index, point in enumerate(points):
+        try:
+            coords = [float(value) for value in point]
+        except (TypeError, ValueError) as exc:
+            raise _bad_args(f"point {index} is not a sequence of numbers: {point!r}") from exc
+        if len(coords) != dims:
+            raise _bad_args(
+                f"point {index} has {len(coords)} coordinates but dims={dims} was asked",
+                hint="use dims=2 for AddLightWeightPolyline and dims=3 for AddLine/AddMText",
+            )
+        if not all(math.isfinite(value) for value in coords):
+            raise _bad_args(f"point {index} has a non-finite coordinate: {point!r}")
+        flat.extend(coords)
+    if not flat:
+        raise _bad_args("no points given")
+    return _double_array(tuple(flat))
+
+
+def _collection_names(collection: Any) -> list[str]:
+    """Names of a COM collection (layers, linetypes) by index; one retry per call."""
+    count = retry_expr(lambda: collection.Count)
+    return [str(retry_expr(lambda i=i: collection.Item(i).Name)) for i in range(count)]
+
+
+def _alternatives(
+    requested: str, mapping: Mapping[str, Sequence[str] | str] | None
+) -> tuple[list[str], list[str]]:
+    """(user mapping, built-in fallbacks) for a requested linetype, matched case-insensitively."""
+    key = requested.upper()
+    mapped: list[str] = []
+    for name, targets in (mapping or {}).items():
+        if str(name).upper() == key:
+            mapped += [targets] if isinstance(targets, str) else list(targets)
+    return mapped, list(LINETYPE_FALLBACKS.get(key, ()))
+
+
+def _try_load(linetypes: Any, name: str, files: Sequence[str]) -> bool:
+    """Load ``name`` from the first .lin file that defines it.
+
+    A permanent COM error means "this file does not define it" and is classified by the error
+    itself, never by the localized message. A busy CAD (``COM_TRANSIENT``) is not that answer
+    and propagates.
+    """
+    for filename in files:
+        try:
+            retry_expr(lambda f=filename: linetypes.Load(name, f))
+        except ComError:
+            continue
+        return True
+    return False
+
+
+def load_linetype(
+    doc: Doc,
+    name: str,
+    *,
+    mapping: Mapping[str, Sequence[str] | str] | None = None,
+    files: Sequence[str] = LINETYPE_FILES,
+) -> tuple[str, list[str]]:
+    """Make a linetype available in ``doc`` and return the name to use for it.
+
+    Localized CAD builds often fail to load the English name (``DASHED``) that works elsewhere.
+    The order is: already in the document (case-insensitive) -> ``name`` from each file in
+    ``files`` -> each name in ``mapping`` for ``name`` (the user's ``CAD_CONVENTIONS.md``, tried
+    before the defaults) -> ``LINETYPE_FALLBACKS`` -> ``Continuous``. This never raises because
+    a linetype is unavailable.
+
+    Args:
+        doc: An open document (``AcadSession.open(..., readonly=False)``).
+        name: The linetype the drawing should use, e.g. ``"DASHED"``.
+        mapping: Optional requested name -> names to try instead, from the user's conventions.
+        files: ``.lin`` files to load from, in order.
+
+    Returns:
+        ``(name actually available in the document, warnings)``. Every substitution adds a
+        warning naming both linetypes; pass it on to the user.
+    """
+    requested = str(name).strip()
+    if not requested:
+        raise _bad_args("linetype name is empty")
+    linetypes = retry_expr(lambda: doc.raw.Linetypes)
+    present = {n.upper(): n for n in _collection_names(linetypes)}
+    mapped, defaults = _alternatives(requested, mapping)
+    chain: dict[str, str] = {}  # upper-case -> candidate; keeps order, drops duplicates
+    for candidate in (requested, *mapped, *defaults, "Continuous"):
+        chain.setdefault(candidate.upper(), candidate)
+    for candidate in chain.values():
+        key = candidate.upper()
+        actual = present.get(key)
+        if actual is None and key in _BUILTIN_LINETYPES:
+            actual = candidate
+        if actual is None and _try_load(linetypes, candidate, files):
+            actual = present[key] = candidate
+        if actual is None:
+            continue
+        if key == requested.upper():
+            return actual, []
+        tried = ", ".join(files)
+        extra = " (lines will be solid)" if key == "CONTINUOUS" else ""
+        message = (
+            f"linetype {requested!r} is not available in this CAD (tried {tried}); "
+            f"using {actual!r} instead{extra}"
+        )
+        return actual, [message]
+    raise AssertionError("Continuous is always available")  # pragma: no cover
+
+
+def _check_layer_name(name: str) -> str:
+    # never trim silently: the caller would then draw on a name that is not the created layer
+    text = str(name)
+    bad = sorted(_LAYER_NAME_FORBIDDEN.intersection(text))
+    if text != text.strip():
+        why = "starts or ends with a space"
+    elif bad:
+        why = f"contains {' '.join(bad)}"
+    elif not text or len(text) > _MAX_LAYER_NAME:
+        why = f"empty or longer than {_MAX_LAYER_NAME}"
+    else:
+        return text
+    raise _bad_args(f"layer name {text[:40]!r} is not usable: {why}")
+
+
+def ensure_layer(
+    doc: Doc,
+    name: str,
+    *,
+    color: int | None = None,
+    linetype: str | None = None,
+    mapping: Mapping[str, Sequence[str] | str] | None = None,
+) -> list[str]:
+    """Create layer ``name`` when it is missing; never touch an existing layer.
+
+    Args:
+        doc: An open document.
+        name: Layer name (matched case-insensitively against existing layers).
+        color: AutoCAD colour index 1-255 for a NEW layer.
+        linetype: Linetype for a NEW layer, made available through ``load_linetype``.
+        mapping: Passed to ``load_linetype``.
+
+    Returns:
+        Warnings to pass on to the user: linetype substitutions, and a note when an existing
+        layer's colour or linetype differs from what was asked (it is left as it is, so the
+        diff to the original stays minimal).
+    """
+    layer_name = _check_layer_name(name)
+    if color is not None and (isinstance(color, bool) or not 1 <= int(color) <= 255):
+        raise _bad_args(f"colour must be an AutoCAD colour index 1-255, got {color!r}")
+    layers = retry_expr(lambda: doc.raw.Layers)
+    for index, existing_name in enumerate(_collection_names(layers)):
+        if existing_name.upper() == layer_name.upper():
+            existing = retry_expr(lambda i=index: layers.Item(i))
+            return _layer_differences(existing, existing_name, color, linetype, mapping)
+    warnings: list[str] = []
+    actual = None
+    if linetype is not None:  # resolve first: a failure must not leave a half-made layer
+        actual, warnings = load_linetype(doc, linetype, mapping=mapping)
+    layer = retry_expr(lambda: layers.Add(layer_name))
+    if color is not None:
+        retry_expr(lambda: setattr(layer, "color", int(color)))
+    if actual is not None:
+        retry_expr(lambda: setattr(layer, "Linetype", actual))
+    return warnings
+
+
+def _layer_differences(
+    layer: Any,
+    layer_name: str,
+    color: int | None,
+    linetype: str | None,
+    mapping: Mapping[str, Sequence[str] | str] | None,
+) -> list[str]:
+    warnings: list[str] = []
+    if color is not None:
+        current = retry_expr(lambda: layer.color)
+        if current != color:
+            warnings.append(
+                f"layer {layer_name!r} already exists with colour {current}, not {color}; "
+                "left unchanged"
+            )
+    if linetype is not None:
+        current_lt = str(retry_expr(lambda: layer.Linetype))
+        mapped, defaults = _alternatives(linetype, mapping)
+        acceptable = {n.upper() for n in (linetype, *mapped, *defaults)}
+        if current_lt.upper() not in acceptable:
+            warnings.append(
+                f"layer {layer_name!r} already exists with linetype {current_lt!r}, "
+                f"not {linetype!r}; left unchanged"
+            )
+    return warnings
 
 
 def _create_app(progid: str) -> tuple[Any, Any]:
@@ -1064,7 +1324,7 @@ class AcadSession:
             try:
                 return expr(self._app)
             except AttributeError as exc:
-                if "<unknown>" in str(exc):
+                if _late_bound(exc):
                     self._refresh_app()
                 raise
 

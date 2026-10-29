@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ SKILL = Path(__file__).resolve().parents[1] / "skills" / "cad-drawings"
 sys.path.insert(0, str(SKILL / "scripts"))
 
 import doctor as std  # the standalone, stdlib-only script
+from cadlib import COMMAND_MODULES, __version__
 from cadlib import doctor as lib_doctor
 from cadlib.result import ExitCode
 
@@ -70,9 +72,41 @@ def test_version_comparison(found: str, minimum: str, ok: bool) -> None:
 
 def test_package_state() -> None:
     assert std.package_state("ezdxf", None) == "missing"
-    assert std.package_state("ezdxf", "1.3.0") == "old"
+    assert std.package_state("ezdxf", "1.3.0") == "old"  # below the required floor
+    assert std.package_state("ezdxf", "1.4.0") == "outdated"  # works, upgrade recommended
+    assert std.package_state("ezdxf", "1.4.3") == "outdated"
     assert std.package_state("ezdxf", "1.4.4") == "ok"
+    assert std.package_state("pywin32", "306") == "old"
+    assert std.package_state("pywin32", "307") == "outdated"
+    assert std.package_state("pywin32", "311") == "outdated"
+    assert std.package_state("pywin32", "312") == "ok"
     assert std.package_state("jsonschema", "0.1") == "ok"  # no minimum
+
+
+def test_required_floor_is_not_above_recommended() -> None:
+    assert set(std.REQUIRED_VERSIONS) == set(std.RECOMMENDED_VERSIONS)
+    for name, floor in std.REQUIRED_VERSIONS.items():
+        assert std.version_at_least(std.RECOMMENDED_VERSIONS[name], floor), name
+
+
+def test_required_versions_match_min_deps_pins() -> None:
+    """The floor in doctor is exactly what the CI job `min-deps` installs and tests."""
+    pins: dict[str, str] = {}
+    for raw in (Path(__file__).with_name("min-deps.txt")).read_text("utf-8").splitlines():
+        line = raw.split("#")[0].split(";")[0].strip()
+        if match := re.fullmatch(r"([A-Za-z0-9_.-]+)==([0-9]\S*)", line):
+            pins[match.group(1).lower()] = match.group(2)
+    for name, floor in std.REQUIRED_VERSIONS.items():
+        assert name in pins, f"{name} is not pinned in tests/min-deps.txt"
+        same = std.version_at_least(pins[name], floor) and std.version_at_least(floor, pins[name])
+        assert same, (name, pins[name], floor)
+
+
+def test_summary_reports_skill_version_and_dir() -> None:
+    summary = std.build_report(env=make_env())["summary"]
+    assert summary["skill_version"] == __version__
+    assert Path(summary["skill_dir"]) == SKILL
+    assert (Path(summary["skill_dir"]) / "SKILL.md").is_file()
 
 
 # -- capability matrix ----------------------------------------------------------------------
@@ -101,6 +135,21 @@ def test_worst_case_output_fits_in_4_kb() -> None:
         oda="C:/Program Files/ODA/x/ODAFileConverter.exe",
     )
     assert len(json.dumps(std.build_report(env=busy)).encode("utf-8")) <= 4096
+    # every capability carries a note and an upgrade command, orphans and warnings on top
+    outdated = make_env(
+        hosts=[AUTOCAD] * 6,
+        installs=busy.installs,
+        oda="C:/Program Files/ODA/x/ODAFileConverter.exe",
+        libredwg={"dwg2dxf": "/usr/bin/dwg2dxf", "dxf2dwg": "/usr/bin/dxf2dwg"},
+        packages=dict(FULL, ezdxf="1.4.0", pywin32="307", pymupdf="1.24"),
+        orphans=[
+            {"pid": 4242 + i, "image": "acad.exe", "role": "cad", "run": "r"} for i in range(5)
+        ],
+        free_gb=1.0,
+    )
+    report = std.build_report(env=outdated)
+    assert any("upgrade" in cap for cap in report["summary"]["capabilities"].values())
+    assert len(json.dumps(report).encode("utf-8")) <= 4096
 
 
 def test_windows_with_a_com_host_and_oda_has_every_shipped_capability() -> None:
@@ -171,6 +220,126 @@ def test_old_ezdxf_is_degraded_with_an_upgrade_command() -> None:
     c = caps(make_env(packages=dict(FULL, ezdxf="1.3.0")))
     assert c["read_dxf"]["status"] == "degraded" and "1.4.4" in c["read_dxf"]["install"][0]
     assert c["read_dwg"]["status"] == "missing"
+
+
+def test_ezdxf_below_floor_is_still_missing() -> None:
+    c = caps(make_env(hosts=[AUTOCAD], oda="oda.exe", packages=dict(FULL, ezdxf="1.3.0")))
+    assert c["read_dxf"]["status"] == "degraded"
+    for name in ("read_dwg", "convert"):
+        assert c[name]["status"] == "missing", name
+        assert "ezdxf>=1.4.4" in c[name]["install"][0], name
+    assert c["render"]["status"] != "available"  # only the COM + PDF path is left
+    assert "ezdxf>=1.4.4" in c["render"]["install"][0]
+    assert c["render"]["status"] == "missing" or c["render"]["via"] == "com+pypdfium2"
+    assert all("upgrade" not in cap for cap in c.values())
+
+
+def test_ezdxf_between_floor_and_recommended_is_available_with_upgrade() -> None:
+    packages = dict(FULL, ezdxf="1.4.3")
+    summary, warnings = std.assess(make_env(hosts=[AUTOCAD], oda="oda.exe", packages=packages))
+    c = summary["capabilities"]
+    for name in ("read_dxf", "read_dwg", "render", "convert"):
+        assert c[name]["status"] == "available", name
+        assert "install" not in c[name], name
+        assert "ezdxf>=1.4.4" in c[name]["upgrade"][0], name
+        assert "works with ezdxf 1.4.3" in c[name]["note"], name
+        assert "recommended" in c[name]["note"], name
+    for name in ("plot_deliverable", "edit_dwg", "pdf_to_png"):
+        assert "upgrade" not in c[name], name  # they do not use ezdxf
+    assert len([w for w in warnings if "ezdxf" in w]) == 1
+    assert "1.4.3" in summary["packages"]["ezdxf"]
+    # the same is true without a CAD host and on Linux
+    c = caps(make_env("linux", packages=packages))
+    assert c["read_dxf"]["status"] == "available" and c["render"]["status"] == "available"
+
+
+def test_pywin32_311_keeps_com_and_never_proposes_installing_cad() -> None:
+    packages = dict(FULL, pywin32="311")
+    summary, warnings = std.assess(make_env(hosts=[AUTOCAD], packages=packages))
+    c = summary["capabilities"]
+    for name in ("plot_deliverable", "edit_dwg", "read_dwg", "convert"):
+        assert (c[name]["status"], c[name]["via"]) == ("available", "com"), name
+        assert "pywin32>=312" in c[name]["upgrade"][0], name
+        assert "works with pywin32 311" in c[name]["note"], name
+        assert "install" not in c[name], name
+    assert "Install AutoCAD" not in json.dumps({"summary": summary, "warnings": warnings})
+    assert not any("unavailable" in w for w in warnings)
+    assert len([w for w in warnings if "pywin32" in w]) == 1
+
+
+@pytest.mark.parametrize("pywin32", ["305", None])
+def test_pywin32_below_floor_with_cad_host_proposes_pywin32(pywin32: str | None) -> None:
+    summary, warnings = std.assess(make_env(hosts=[AUTOCAD], packages=dict(FULL, pywin32=pywin32)))
+    c = summary["capabilities"]
+    for name in ("plot_deliverable", "edit_dwg", "read_dwg"):
+        assert c[name]["status"] == "missing", name
+        assert "pywin32>=312" in c[name]["install"][0], name
+    assert "Install AutoCAD" not in json.dumps({"summary": summary, "warnings": warnings})
+    assert any("pywin32" in w and "COM is unavailable" in w for w in warnings)
+
+
+def test_without_a_host_the_cad_application_is_still_proposed() -> None:
+    c = caps(make_env("win32"))
+    assert "Install AutoCAD" in c["plot_deliverable"]["install"][0]
+    assert caps(make_env("linux"))["plot_deliverable"].get("install") is None
+
+
+def test_no_upgrade_field_when_up_to_date() -> None:
+    summary, warnings = std.assess(make_env(hosts=[AUTOCAD], oda="oda.exe"))
+    assert "upgrade" not in json.dumps(summary)
+    assert not any("recommended" in w for w in warnings)
+
+
+# Every command shipped in COMMAND_MODULES -> the doctor capabilities it relies on, or () for
+# commands that need nothing the matrix describes. A new command must be added here.
+COMMAND_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    "doctor": (),
+    "info": ("read_dxf",),
+    "find": ("read_dxf",),
+    "dump": ("read_dxf",),
+    "fingerprint": ("read_dxf",),
+    "diff": ("read_dxf",),
+    "convert": ("convert",),
+    "render": ("render",),
+    "cleanup": (),
+    "edit": ("read_dxf", "edit_dwg"),
+    "plot": ("plot_deliverable",),
+    "qa": ("read_dxf", "pdf_to_png"),
+    "measure": ("read_dxf",),
+    "register": ("read_dxf",),
+    "conventions": ("read_dxf", "read_dwg"),
+}
+
+
+def capability_problems(module: Any) -> list[str]:
+    """Commands whose capability a fully equipped environment of `module` does not report."""
+    env = module.Environment(
+        platform="win32",
+        python=(3, 13, 1),
+        packages=dict(FULL),
+        hosts=[AUTOCAD],
+        oda="oda.exe",
+        libredwg={"dwg2dxf": "a", "dxf2dwg": "b"},
+    )
+    reported = module.assess(env)[0]["capabilities"]
+    problems = [
+        f"{c}: not in the mapping" for c in COMMAND_MODULES if c not in COMMAND_CAPABILITIES
+    ]
+    problems += [
+        f"{c}: in the mapping but not shipped"
+        for c in COMMAND_CAPABILITIES
+        if c not in COMMAND_MODULES
+    ]
+    for command, needed in COMMAND_CAPABILITIES.items():
+        for cap in needed:
+            status = reported.get(cap, {}).get("status")
+            if status != "available":
+                problems.append(f"{command}: capability {cap} is {status or 'absent'}")
+    return problems
+
+
+def test_every_command_maps_to_a_shipped_capability() -> None:
+    assert capability_problems(std) == []
 
 
 def test_pdf_to_png_needs_pypdfium2_5() -> None:
@@ -444,7 +613,7 @@ def test_render_without_pypdfium2_degrades_instead_of_failing() -> None:
 
 
 def test_old_matplotlib_is_not_enough() -> None:
-    assert std.MIN_VERSIONS["matplotlib"] == "3.8"
+    assert std.REQUIRED_VERSIONS["matplotlib"] == "3.8"
     c = caps(make_env("linux", packages=dict(FULL, matplotlib="3.7.5")))
     assert c["render"]["status"] == "missing"
     assert any("matplotlib>=3.8" in cmd for cmd in c["render"]["install"])

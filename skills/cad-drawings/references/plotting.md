@@ -63,6 +63,7 @@ If `--dest` is given, finished PDFs are copied there atomically. A failed layout
 - **Each layout is plotted to a fresh document.** The CAD application closes the document after plotting, so layout-to-layout state is not carried over.
 - **Page sizes are in millimetres.** The output verification compares page size with the media within `±0.1 mm` tolerance.
 - **Media names are device-specific.** A name that works for one device may not work for another. Use `info --conventions` to see what the drawing knows about the configured device.
+- **A viewer holds the PDF (`DEST_LOCKED`, exit 4).** The PDF plotter may have opened the earlier PDFs in the user's viewer, which then blocks replacing them in `--dest`. Ask the user to close the file, then rerun with `--overwrite`, or pass another `--dest`. The new PDFs are in the run directory and listed in `outputs`. Never delete plot outputs to work around it.
 - **System variables are reset after the plot.** `BACKGROUNDPLOT` is set to 0 (synchronous plotting) during the command and restored to the original value afterwards.
 
 ## Exit codes
@@ -70,5 +71,6 @@ If `--dest` is given, finished PDFs are copied there atomically. A failed layout
 - 0: all layouts plotted successfully
 - 2: bad arguments (e.g., invalid scale or rotation)
 - 3: CAD application not available (missing consent or no CAD on this system)
+- 4: `DEST_LOCKED`: a file in `--dest` is held by another program (usually a PDF viewer), so it cannot be replaced; the PDFs stay in the run directory and in `outputs`, and `plot.json` is written
 - 6: no paper layout with content to plot (if no `--layout` is given) or a target already exists in `--dest`
 - 7: partial success (some layouts failed; finished PDFs are kept)

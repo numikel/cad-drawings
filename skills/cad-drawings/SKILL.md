@@ -11,11 +11,12 @@ description: >-
   3D models, or PDF or raster image editing.
 license: MIT
 compatibility: >-
-  Python 3.10+ with ezdxf 1.4.4+ and pypdfium2. DWG files require AutoCAD or a compatible CAD
-  via COM (Windows, pywin32 312+), ODA File Converter, or LibreDWG. Run scripts/doctor.py first
-  to check what is installed and get install options per platform.
+  Python 3.10+ with ezdxf 1.4.0+ (1.4.4+ recommended) and pypdfium2. DWG files require AutoCAD
+  or a compatible CAD via COM (Windows, pywin32 307+, 312+ recommended), ODA File Converter, or
+  LibreDWG. Run scripts/doctor.py first to check what is installed and get install options per
+  platform.
 metadata:
-  version: "0.3.0"
+  version: "0.4.0-rc.1"
 ---
 
 ## Overview
@@ -30,7 +31,7 @@ All command paths are relative to the skill directory. Use `python3` where `pyth
 python scripts/doctor.py
 ```
 
-This reports your system's capabilities (read DXF, read DWG, convert, render, PDF to PNG), missing components with install options per platform, and never installs anything by itself. If something is missing, ask the user to install it (the tool lists the exact commands) or choose a fallback backend.
+This reports your system's capabilities (read DXF, read DWG, convert, render, PDF to PNG), missing components with install options per platform, and never installs anything by itself. If something is missing, ask the user to install it (the tool lists the exact commands) or choose a fallback backend. A capability marked `available` works even when it also lists an `upgrade` command: use it, and mention the optional upgrade to the user once. `summary.skill_version` tells you which version of this skill is running.
 
 ## Talking to the user
 
@@ -212,17 +213,21 @@ python scripts/cad.py plot <file> --allow-com --layout "Sheet-A" --scale fit --d
 
 The command plots one layout per PDF and optionally copies them to a destination. See `references/plotting.md` for page-setup options and the exact plotter behaviour.
 
-For custom edits or plots beyond these commands, for more control, read `references/com-automation.md` and write a short script on top of the bundled session library.
+### Add new content to a DWG
+
+`edit` only changes entities that already exist. To add lines, polylines, text, layers or linetypes to a DWG (for example routes, markings or labels), follow the recipe in `references/com-automation.md` and write one short script on top of the bundled session library (`AcadSession`, `ensure_layer`, `load_linetype`, `point_array`), then plot the saved copy with `plot`. Do not write raw `win32com` code (`DispatchEx`, `Dispatch`, `GetActiveObject`) and do not call private helpers (names starting with `_`, or `acad_edit`): the library owns the CAD instance, retries rejected calls, finds a linetype that exists in the user's language version and cleans up its process. Report every warning the helpers return, such as a substituted linetype. For a DXF, add the entities with ezdxf directly (`references/dxf-analysis.md`).
+
+For other custom edits or plots beyond these commands, read `references/com-automation.md` and build on the same library.
 
 ## Project conventions
 
-Before editing or plotting, locate the project's `CAD_CONVENTIONS.md` file (usually next to the drawings). If it exists, read it; it takes precedence over this skill. If it does not exist, run:
+Before editing or plotting, look for the project's `CAD_CONVENTIONS.md`: first in the drawing's folder, then in each parent folder up to the project root (the repository or the top project folder). A file applies when its §0 Scope covers the drawing. If it exists, read it; it takes precedence over this skill. If none applies, sample the project's recent drawings:
 
 ```
-python scripts/cad.py info <any-sheet> --conventions
+python scripts/cad.py conventions <folder or files> [--max-files 20]
 ```
 
-This lists units, layout sizes, text styles, title-block fields, layer names. Ask the user to confirm or correct each, then save the answers to `CAD_CONVENTIONS.md` using the template in `references/cad-conventions-template.md`, or copy `references/CAD_CONVENTIONS.default.md` into the project and adapt each field.
+This aggregates units, paper sizes, text styles and heights, layer names, title-block blocks and naming patterns across the files, each with a count (`41 of 44 layouts use A1`) ready for the template's `Source` column; `info <file> --conventions` does the same for one sheet. Ask the user to confirm or correct each, then save the answers to `CAD_CONVENTIONS.md` using the template in `references/cad-conventions-template.md`, or copy `references/CAD_CONVENTIONS.default.md` into the project and adapt each field.
 
 Conventions capture what the drawings teach: sheet sizes, units, layer naming, title block field meanings, text heights, scales. With them recorded, the agent does not have to infer or ask again.
 
@@ -230,7 +235,7 @@ Conventions capture what the drawings teach: sheet sizes, units, layer naming, t
 
 - **The CAD session the user works in is not yours.** Do not connect to the user's running AutoCAD unless they explicitly say to attach. Never pick documents via `ActiveDocument`, never close or save documents the scripts did not open, never change `Visible` on an instance you did not start. Work on copies.
 
-- **COM calls fail transiently while CAD is busy** (`-2147418111` "Call was rejected by callee", or a late-bound `AttributeError: <unknown>.X`). Retries are built in, classified by HRESULT. But do not loop over tens of thousands of entities through COM; every property access is a cross-process call. Find targets in ezdxf (instant), edit them by handle through COM.
+- **COM calls fail transiently while CAD is busy** (`-2147418111` "Call was rejected by callee", or a late-bound `AttributeError: <unknown>.X` or `Open.X`). Retries are built in, classified by HRESULT. But do not loop over tens of thousands of entities through COM; every property access is a cross-process call. Find targets in ezdxf (instant), edit them by handle through COM.
 
 - **Old outputs look like new ones.** `PlotToFile` does not overwrite an existing file. A stale PDF, PNG or DXF from an earlier run passes an "exists" check. All scripts write to a fresh run directory; artifacts are never reused if they are older than their source.
 
@@ -281,7 +286,7 @@ The JSON is always compact (under ~4 KB). Large data (full entity lists, diffs, 
 
 Commands that can reach CAD stop their own work after `--timeout` seconds (default 100, below typical shell-command limits). For longer jobs (large DWG conversions, many layouts), start the command in the background if the host allows it, then poll `status.json` in the run directory (`state` is `running`, `done` or `failed`) and read the JSON summary when it finishes; otherwise split the work per layout or file. Killing a running command can leave a CAD process behind: the library ties its CAD process to the command, but check `python scripts/doctor.py` (field `orphans`) afterwards. The run directory is never deleted by the commands; use `cleanup` to remove old runs.
 
-Exit codes: 0 = success, 1 = error, 2 = bad arguments, 3 = missing dependency or backend, 4 = resource busy (file locked, document open elsewhere), 5 = timeout, 6 = precondition not met (target already exists, empty layout, confirmation missing), 7 = partial success. A missing input file is exit 2.
+Exit codes: 0 = success, 1 = error, 2 = bad arguments, 3 = missing dependency or backend, 4 = resource busy (file locked, document open elsewhere, a `--dest` PDF held by a PDF viewer), 5 = timeout, 6 = precondition not met (target already exists, empty layout, confirmation missing), 7 = partial success. A missing input file is exit 2.
 
 ## When to read which reference file
 
@@ -289,7 +294,7 @@ Exit codes: 0 = success, 1 = error, 2 = bad arguments, 3 = missing dependency or
 |---|---|
 | `references/plotting.md` | Plot with `plot` (device, media, area, scale, rotation, page setup fallbacks) |
 | `references/edit-plans.md` | Edit with `edit` (plan format, handle persistence, operations, verification, idempotence) |
-| `references/com-automation.md` | Write custom code using the COM library or edit through the CAD application (HRESULT table, late-binding traps, `HandleToObject`, retry patterns, document lifecycle, editing traps) |
+| `references/com-automation.md` | Add new content to a DWG (recipe), write custom code using the COM library or edit through the CAD application (HRESULT table, late-binding traps, `HandleToObject`, retry patterns, document lifecycle, editing traps) |
 | `references/dxf-analysis.md` | Write ezdxf code or understand `edit` on a DXF (entity queries, MTEXT, plain vs raw text, block/space mapping, handle limits) |
 | `references/backends-and-install.md` | `doctor` reports missing components and you need per-OS install commands or license notes |
 | `references/geometry-and-units.md` | Measure, align or check geometry (spaces and coordinate systems, units, printable area and plot origin, `measure --join` and `--gap`, large coordinates, `register`, text size estimates, sheet frame detection) |

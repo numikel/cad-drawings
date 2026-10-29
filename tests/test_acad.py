@@ -190,7 +190,15 @@ def make_session(app: FakeApp | None = None, **kw: Any) -> acad.AcadSession:
         ),
         (FakeComError(-2147352565), "permanent"),
         (AttributeError("<unknown>.Quit"), "transient"),
+        # late binding names the proxy after the call that returned it, or after the ProgID
+        (AttributeError("Open.Activate"), "transient"),
+        (AttributeError("Open.SetVariable"), "transient"),
+        (AttributeError("AutoCAD.Application.24.3.Quit"), "transient"),
+        # the setter form of the same late-binding failure (win32com dynamic __setattr__)
+        (AttributeError("Property '<unknown>.Visible' can not be set."), "transient"),
+        (AttributeError("Property 'Open.ActiveLayout' can not be set."), "transient"),
         (AttributeError("'X' object has no attribute 'y'"), "other"),
+        (AttributeError("module 'ezdxf' has no attribute 'bbox'"), "other"),
         (ValueError("boom"), "other"),
         (CadError("X", "y"), "other"),
     ],
@@ -226,6 +234,33 @@ def test_retry_backoff_is_capped_and_exhaustion_is_transient_error(clock: Clock)
     assert info.value.code == "COM_TRANSIENT"
     assert info.value.exit_code == ExitCode.BUSY
     assert clock.sleeps == [0.4, 0.8, 1.6, 3.2, 5.0, 5.0, 5.0, 5.0]  # 9 tries, 8 waits
+
+
+def test_named_late_bound_error_is_retried_briefly_then_reraised(clock: Clock) -> None:
+    # a typo in a member name looks exactly like a busy proxy: retry briefly, then let the
+    # programming error surface as itself, not as "CAD is busy"
+    calls = []
+
+    def typo() -> None:
+        calls.append(1)
+        raise AttributeError("ModelSpace.AddLightWeightPolylinee")
+
+    with pytest.raises(AttributeError, match="AddLightWeightPolylinee"):
+        acad.retry(typo)
+    assert len(calls) == acad.LATE_BOUND_TRIES
+    assert sum(clock.sleeps) < 10
+
+
+def test_named_late_bound_error_that_clears_is_retried(clock: Clock) -> None:
+    calls = []
+
+    def not_ready() -> str:
+        calls.append(1)
+        if len(calls) < 3:
+            raise AttributeError("Open.Activate")
+        return "ok"
+
+    assert acad.retry(not_ready) == "ok"
 
 
 def test_retry_permanent_raises_at_once_with_codes(clock: Clock) -> None:
@@ -633,11 +668,12 @@ def test_quit_tolerates_server_gone_during_quit(
     assert not session.warnings
 
 
+@pytest.mark.parametrize("message", ["<unknown>.Quit", "AutoCAD.Application.24.3.Quit"])
 def test_quit_refetches_the_application_object(
-    monkeypatch: pytest.MonkeyPatch, clock: Clock
+    monkeypatch: pytest.MonkeyPatch, clock: Clock, message: str
 ) -> None:
     stale, fresh = FakeApp(), FakeApp()
-    stale.Quit = lambda: (_ for _ in ()).throw(AttributeError("<unknown>.Quit"))  # type: ignore[method-assign]
+    stale.Quit = lambda: (_ for _ in ()).throw(AttributeError(message))  # type: ignore[method-assign]
     patch_process(monkeypatch, fresh, "quit")
     monkeypatch.setattr(acad, "_wrap", lambda disp: fresh)
     session = make_session(stale, disp=object())
@@ -1167,6 +1203,264 @@ def test_save_dwg_closes_the_document_before_moving(clock: Clock, tmp_path: Path
     assert dst.read_text() == "DWG" and session.documents == []
 
 
+# --- drawing helpers: point_array, load_linetype, ensure_layer ---------------------------------
+
+
+class FakeLinetype:
+    def __init__(self, name: str) -> None:
+        self.Name = name
+
+
+class FakeLinetypes:
+    """The Linetypes collection. ``Load`` raises a COM error (never relying on message text,
+    which is localized) when the .lin file does not define the name."""
+
+    def __init__(
+        self, files: dict[str, set[str]], loaded: tuple[str, ...] = ("Continuous", "ByLayer")
+    ) -> None:
+        self.files = files  # lower-case .lin file name -> names that file defines
+        self.items = [FakeLinetype(n) for n in loaded]
+        self.load_calls: list[tuple[str, str]] = []
+        self.busy = False  # every Load is rejected as "CAD is busy"
+
+    @property
+    def Count(self) -> int:
+        return len(self.items)
+
+    def Item(self, index: int) -> FakeLinetype:
+        return self.items[index]
+
+    def Load(self, name: str, filename: str) -> None:
+        self.load_calls.append((name, filename))
+        if self.busy:
+            raise FakeComError(acad.RPC_E_CALL_REJECTED, "busy")
+        defined = {n.upper() for n in self.files.get(filename.lower(), set())}
+        if name.upper() not in defined:
+            info = (0, "AutoCAD", "texte localise", None, 0, -2145320924)
+            raise FakeComError(acad.DISP_E_EXCEPTION, "localized text", info)
+        self.items.append(FakeLinetype(name))
+
+
+class FakeLayer:
+    def __init__(self, name: str, color: int = 7, linetype: str = "Continuous") -> None:
+        self.Name = name
+        self.color = color
+        self.Linetype = linetype
+
+
+class FakeLayers:
+    def __init__(self, existing: tuple[FakeLayer, ...] = ()) -> None:
+        self.items = [FakeLayer("0"), *existing]
+        self.added: list[str] = []
+
+    @property
+    def Count(self) -> int:
+        return len(self.items)
+
+    def Item(self, index: int) -> FakeLayer:
+        return self.items[index]
+
+    def Add(self, name: str) -> FakeLayer:
+        self.added.append(name)
+        layer = FakeLayer(name)
+        self.items.append(layer)
+        return layer
+
+
+def drawing_doc(
+    files: dict[str, set[str]] | None = None,
+    *,
+    loaded: tuple[str, ...] = ("Continuous", "ByLayer"),
+    layers: tuple[FakeLayer, ...] = (),
+) -> SimpleNamespace:
+    raw = SimpleNamespace(Linetypes=FakeLinetypes(files or {}, loaded), Layers=FakeLayers(layers))
+    return SimpleNamespace(raw=raw)
+
+
+@pytest.fixture
+def fake_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_com()`` whose VARIANT is a plain (type, values) tuple, so no pywin32 is needed."""
+    com = SimpleNamespace(
+        pythoncom=SimpleNamespace(VT_ARRAY=0x2000, VT_R8=5),
+        client=SimpleNamespace(VARIANT=lambda kind, values: (kind, values)),
+    )
+    monkeypatch.setattr(acad, "_com", lambda: com)
+
+
+def test_point_array_flattens_2d_and_3d(fake_variant: None) -> None:
+    flat2 = acad.point_array([(0, 0), (1, 2.5), (3, 4)])
+    assert flat2 == (0x2000 | 5, [0.0, 0.0, 1.0, 2.5, 3.0, 4.0])
+    flat3 = acad.point_array([(1, 2, 3), (4, 5, 6)], dims=3)
+    assert flat3 == (0x2000 | 5, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+    assert acad.point_array(iter([[7, 8]]))[1] == [7.0, 8.0]  # any iterable of sequences
+
+
+@pytest.mark.parametrize(
+    ("points", "dims", "needle"),
+    [
+        ([(0, 0), (1, 2, 3)], 2, "point 1"),  # a 3D point where 2D is asked
+        ([(0, 0, 0), (1, 2)], 3, "point 1"),  # a 2D point where 3D is asked
+        ([(0, 0)], 4, "dims"),  # only 2 or 3 exist
+        ([], 2, "no points"),
+        ([(0, "x")], 2, "point 0"),  # not a number
+    ],
+)
+def test_point_array_rejects_wrong_input_with_a_clear_error(
+    fake_variant: None, points: list[Any], dims: int, needle: str
+) -> None:
+    with pytest.raises(CadError) as err:
+        acad.point_array(points, dims=dims)
+    assert err.value.code == "BAD_ARGS" and err.value.exit_code == ExitCode.BAD_ARGS
+    assert needle in err.value.message
+
+
+def test_ensure_layer_creates_missing_layer_with_color_and_linetype() -> None:
+    doc = drawing_doc({"acadiso.lin": {"DASHED"}})
+    warnings = acad.ensure_layer(doc, "ROUTE", color=1, linetype="DASHED")
+    layers = doc.raw.Layers
+    assert warnings == [] and layers.added == ["ROUTE"]
+    created = layers.items[-1]
+    assert (created.Name, created.color, created.Linetype) == ("ROUTE", 1, "DASHED")
+    assert doc.raw.Linetypes.load_calls == [("DASHED", "acadiso.lin")]
+
+
+def test_ensure_layer_without_options_only_adds_the_layer() -> None:
+    doc = drawing_doc()
+    assert acad.ensure_layer(doc, "NOTES") == []
+    created = doc.raw.Layers.items[-1]
+    assert (created.color, created.Linetype) == (7, "Continuous")
+    assert doc.raw.Linetypes.load_calls == []
+
+
+def test_ensure_layer_never_modifies_an_existing_layer() -> None:
+    existing = FakeLayer("Route", color=3, linetype="Continuous")
+    doc = drawing_doc({"acadiso.lin": {"DASHED"}}, layers=(existing,))
+    warnings = acad.ensure_layer(doc, "ROUTE", color=1, linetype="DASHED")  # case-insensitive
+    assert doc.raw.Layers.added == [] and doc.raw.Linetypes.load_calls == []
+    assert (existing.color, existing.Linetype) == (3, "Continuous")
+    assert len(warnings) == 2
+    assert any("colour" in w and "3" in w and "1" in w for w in warnings)
+    assert any("linetype" in w and "Continuous" in w and "DASHED" in w for w in warnings)
+
+
+def test_ensure_layer_existing_layer_that_already_matches_is_silent() -> None:
+    # the substitute the document actually uses counts as a match for the requested name
+    existing = FakeLayer("ROUTE", color=1, linetype="ACAD_ISO02W100")
+    doc = drawing_doc(layers=(existing,))
+    assert acad.ensure_layer(doc, "ROUTE", color=1, linetype="DASHED") == []
+
+
+def test_ensure_layer_passes_linetype_warnings_on() -> None:
+    doc = drawing_doc({"acadiso.lin": {"ACAD_ISO02W100"}})
+    warnings = acad.ensure_layer(doc, "ROUTE", linetype="DASHED")
+    assert doc.raw.Layers.items[-1].Linetype == "ACAD_ISO02W100"
+    assert len(warnings) == 1 and "DASHED" in warnings[0] and "ACAD_ISO02W100" in warnings[0]
+
+
+@pytest.mark.parametrize("name", ["", "A/B", "bad:name", "x" * 256, "  ROUTE", "ROUTE ", "A,B"])
+def test_ensure_layer_rejects_unusable_names(name: str) -> None:
+    with pytest.raises(CadError) as err:
+        acad.ensure_layer(drawing_doc(), name)
+    assert err.value.exit_code == ExitCode.BAD_ARGS
+
+
+def test_ensure_layer_rejects_an_unusable_colour() -> None:
+    with pytest.raises(CadError) as err:
+        acad.ensure_layer(drawing_doc(), "ROUTE", color=300)
+    assert err.value.exit_code == ExitCode.BAD_ARGS
+
+
+def test_load_linetype_returns_requested_when_it_loads() -> None:
+    doc = drawing_doc({"acadiso.lin": {"DASHED"}})
+    assert acad.load_linetype(doc, "DASHED") == ("DASHED", [])
+    assert doc.raw.Linetypes.load_calls == [("DASHED", "acadiso.lin")]
+
+
+def test_load_linetype_tries_the_second_file_before_substituting() -> None:
+    doc = drawing_doc({"acad.lin": {"DASHED"}})
+    assert acad.load_linetype(doc, "DASHED") == ("DASHED", [])
+    assert doc.raw.Linetypes.load_calls == [("DASHED", "acadiso.lin"), ("DASHED", "acad.lin")]
+
+
+def test_load_linetype_falls_back_to_iso_and_warns() -> None:
+    # localized CAD: DASHED is unknown, the language-neutral ISO name loads
+    doc = drawing_doc({"acadiso.lin": {"ACAD_ISO02W100"}})
+    name, warnings = acad.load_linetype(doc, "DASHED")
+    assert name == "ACAD_ISO02W100"
+    assert len(warnings) == 1 and "DASHED" in warnings[0] and "ACAD_ISO02W100" in warnings[0]
+
+
+def test_load_linetype_already_loaded_is_not_reloaded() -> None:
+    doc = drawing_doc({"acadiso.lin": {"DASHED"}}, loaded=("Continuous", "Dashed"))
+    assert acad.load_linetype(doc, "DASHED") == ("Dashed", [])  # the document's own spelling
+    assert doc.raw.Linetypes.load_calls == []
+
+
+def test_load_linetype_uses_an_already_loaded_substitute_without_loading() -> None:
+    doc = drawing_doc(loaded=("Continuous", "ACAD_ISO02W100"))
+    name, warnings = acad.load_linetype(doc, "DASHED")
+    assert name == "ACAD_ISO02W100" and len(warnings) == 1
+    assert ("ACAD_ISO02W100", "acadiso.lin") not in doc.raw.Linetypes.load_calls
+
+
+def test_load_linetype_user_mapping_overrides_default() -> None:
+    doc = drawing_doc({"acadiso.lin": {"ACAD_ISO02W100", "HOUSE_DASH"}})
+    name, warnings = acad.load_linetype(doc, "DASHED", mapping={"dashed": ["HOUSE_DASH"]})
+    assert name == "HOUSE_DASH" and "HOUSE_DASH" in warnings[0]
+    # a mapping name that does not load falls through to the defaults
+    doc = drawing_doc({"acadiso.lin": {"ACAD_ISO02W100"}})
+    name, _ = acad.load_linetype(doc, "DASHED", mapping={"DASHED": ["NOPE", "HOUSE_DASH"]})
+    assert name == "ACAD_ISO02W100"
+
+
+def test_load_linetype_mapping_accepts_a_single_string() -> None:
+    doc = drawing_doc({"acadiso.lin": {"HOUSE_DASH"}})
+    assert acad.load_linetype(doc, "DASHED", mapping={"DASHED": "HOUSE_DASH"})[0] == "HOUSE_DASH"
+
+
+def test_load_linetype_honours_the_files_argument() -> None:
+    doc = drawing_doc({"custom.lin": {"DASHED"}})
+    assert acad.load_linetype(doc, "DASHED", files=("custom.lin",)) == ("DASHED", [])
+    assert doc.raw.Linetypes.load_calls == [("DASHED", "custom.lin")]
+
+
+def test_load_linetype_nothing_loads_returns_continuous_with_warning() -> None:
+    doc = drawing_doc({})
+    name, warnings = acad.load_linetype(doc, "WEIRD_SHAPE")
+    assert name == "Continuous"
+    assert len(warnings) == 1 and "WEIRD_SHAPE" in warnings[0] and "Continuous" in warnings[0]
+
+
+def test_load_linetype_never_raises_for_an_unavailable_linetype() -> None:
+    doc = drawing_doc({})
+    for requested in ("DASHED", "CENTER", "HIDDEN", "DASHDOT", "PHANTOM", "Anything"):
+        assert acad.load_linetype(doc, requested)[0] == "Continuous"
+
+
+@pytest.mark.parametrize("name", ["Continuous", "CONTINUOUS", "ByLayer", "ByBlock"])
+def test_load_linetype_builtin_names_need_no_loading(name: str) -> None:
+    doc = drawing_doc({})
+    actual, warnings = acad.load_linetype(doc, name)
+    assert actual.upper() == name.upper() and warnings == []  # the document's own spelling
+    assert doc.raw.Linetypes.load_calls == []
+
+
+def test_load_linetype_a_busy_cad_is_not_an_unavailable_linetype(clock: Clock) -> None:
+    doc = drawing_doc({"acadiso.lin": {"DASHED"}})
+    doc.raw.Linetypes.busy = True
+    with pytest.raises(CadError) as err:
+        acad.load_linetype(doc, "DASHED")
+    assert err.value.code == "COM_TRANSIENT"  # propagated, not turned into "Continuous"
+
+
+def test_linetype_fallback_tables_are_language_neutral() -> None:
+    assert acad.LINETYPE_FILES == ("acadiso.lin", "acad.lin")
+    assert acad.LINETYPE_FALLBACKS["DASHED"] == ("ACAD_ISO02W100",)
+    assert acad.LINETYPE_FALLBACKS["CENTER"] == ("ACAD_ISO04W100",)
+    for key, names in acad.LINETYPE_FALLBACKS.items():
+        assert key == key.upper() and names and all(n.startswith("ACAD_ISO") for n in names)
+
+
 # --- COM (real CAD) ------------------------------------------------------------------------------
 
 
@@ -1269,6 +1563,67 @@ def test_com_session_end_to_end(
     assert not acad._list_pids(image), "an acad.exe was left running"
     assert pid not in acad._list_pids(image)
     assert not list(out.glob("*.dwl*")) and not list(out.glob("*.part.*"))
+
+
+@pytest.mark.com
+@pytest.mark.skipif(not _cad_installed(), reason="no AutoCAD COM server registered")
+def test_com_recipe_runs_on_a_copy(tmp_path: Path, fixtures_dir: Path) -> None:
+    """The recipe of references/com-automation.md on a synthetic drawing: stage a copy, add
+    geometry, save under a new name; the original stays byte-identical."""
+    from cadlib.runs import RunContext, file_sha1, stage_copy
+
+    out = Path(os.environ.get("CAD_DRAWINGS_COM_OUT", tmp_path)) / "com-recipe"
+    out.mkdir(parents=True, exist_ok=True)
+    image = "acad.exe"
+    if acad._list_pids(image):
+        pytest.skip("another acad.exe is running; refusing to touch it")
+    original = out / "recipe_original.dwg"
+    ctx = RunContext.create("recipe-test", base=out / "runs")
+    warnings: list[str] = []
+    try:
+        with acad.AcadSession.start(timeout=120) as session:
+            # the "user's drawing": made from a fixture, then left alone
+            session.save_dwg(session.open(fixtures_dir / "sheet_set.dxf"), original)
+            digest = file_sha1(original)
+
+            copy = stage_copy(original, ctx)
+            dst = ctx.path("with_route.dwg")
+            doc = session.open(copy, readonly=False)
+            before = acad.retry_expr(lambda: doc.raw.ModelSpace.Count)
+            warnings += acad.ensure_layer(doc, "RECIPE-ROUTE", color=1, linetype="DASHED")
+            space = doc.raw.ModelSpace
+            line = acad.retry_expr(
+                lambda: space.AddLightWeightPolyline(
+                    acad.point_array([(0, 0), (500, 0), (500, 300)])
+                )
+            )
+            line.Layer = "RECIPE-ROUTE"
+            label = acad.retry_expr(
+                lambda: space.AddMText(acad.point_array([(0, 20, 0)], dims=3), 200.0, "route A")
+            )
+            label.Layer = "RECIPE-ROUTE"
+            session.save_dwg(doc, dst)  # closes the document
+
+            with session.open(dst) as saved:
+                assert acad.retry_expr(lambda: saved.raw.ModelSpace.Count) == before + 2
+                names = {
+                    acad.retry_expr(lambda i=i: saved.raw.Layers.Item(i).Name)
+                    for i in range(acad.retry_expr(lambda: saved.raw.Layers.Count))
+                }
+                assert "RECIPE-ROUTE" in names
+        assert dst.is_file() and dst.stat().st_size > 0
+        assert file_sha1(original) == digest, "the original changed"
+        assert not acad._list_pids(image), "an acad.exe was left running"
+    finally:
+        ctx.finish()
+        leftovers = [original, *(p for p in ctx.dir.rglob("*") if p.is_file())]
+        for path in leftovers:  # file by file, never a recursive delete
+            with contextlib.suppress(OSError):
+                path.unlink()
+        for folder in sorted((p for p in ctx.dir.rglob("*") if p.is_dir()), reverse=True):
+            with contextlib.suppress(OSError):
+                folder.rmdir()
+    assert isinstance(warnings, list)  # linetype substitutions are reported, never raised
 
 
 # --- hardening: orphan protection, watchdog, lock ownership, messages ----------------------------

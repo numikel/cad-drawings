@@ -82,6 +82,7 @@ Tags: `[norm: ISO 5457 §4.2]` = paraphrase of a published standard (the clause 
 - Model-space text height = paper height × scale denominator (2.5 mm at 1:100 in a millimetre model = 250). Annotative objects store a paper height and show only in viewports whose annotation scale they carry. Paper-space text is drawn at full size. [practice]
 - Keep the drawing's language, terms, capitalization and abbreviations; explain symbols and abbreviations in the legend; prefer graphics to words. [norm: ISO 128-1 §5 d)]
 - Text reads from the bottom or from the right of the sheet. [norm: ISO 129-1 §4.1.1; practice] Use existing text styles; fonts must exist for every recipient or be embedded/converted in PDFs. [practice]
+- Text masks (MText background fill, wipeouts) must never hide the geometry the sheet exists to show, such as a route, a boundary or a symbol. Place labels beside the lines they describe; use a mask only over background hatching or grid lines, and check the plotted sheet for anything it covers. [practice]
 
 ## 8. Dimensions
 

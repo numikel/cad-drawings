@@ -164,7 +164,7 @@ flowchart TD
 
 ## Requirements
 
-- Python 3.10+, `ezdxf` ≥ 1.4.4, `pypdfium2`, `Pillow`, `matplotlib` (and `pywin32` ≥ 312 on Windows for COM). `doctor` checks these.
+- Python 3.10+, `ezdxf` ≥ 1.4.0, `pypdfium2`, `Pillow`, `matplotlib` (and `pywin32` ≥ 307 on Windows for COM). These are the versions CI tests against. `doctor` checks them and recommends `ezdxf` 1.4.4 and `pywin32` 312: older versions keep working and `doctor` only suggests an `upgrade` command.
 - For DWG files, one of: ODA File Converter, LibreDWG, or AutoCAD or a compatible CAD with COM on Windows.
 
 | | Windows | macOS | Linux |

@@ -83,6 +83,7 @@ Read this when you create or update a project's `CAD_CONVENTIONS.md` together wi
 |---|---|---|---|
 | Line groups; lineweight per layer or use | | | layer lineweights; plot style mapping |
 | Linetypes and linetype scaling | | | linetype table; `$LTSCALE`, `$PSLTSCALE` |
+| Linetypes: requested name → name to use → .lin file | | | LTYPE table of recent drawings |
 | Plot style table (CTB / STB file) and colour policy | | | plot settings of layouts |
 
 ## 8. Layouts and viewports

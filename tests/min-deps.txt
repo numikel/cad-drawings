@@ -1,0 +1,10 @@
+# Constraints for the oldest dependency versions the skill still supports (the "required" floor
+# in scripts/doctor.py, REQUIRED_VERSIONS). The CI job `min-deps` installs with
+#   pip install -c tests/min-deps.txt ezdxf pypdfium2 pillow matplotlib pytest jsonschema
+# (+ pywin32 on Windows) and runs the non-COM test suite on Python 3.10.
+# tests/test_doctor.py fails when a pin here differs from REQUIRED_VERSIONS.
+ezdxf==1.4.0
+pypdfium2==5.0.0
+matplotlib==3.8.0
+numpy<2  # matplotlib 3.8.0 wheels are built against NumPy 1.x
+pywin32==307; sys_platform == "win32"
