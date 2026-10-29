@@ -16,7 +16,7 @@ compatibility: >-
   LibreDWG. Run scripts/doctor.py first to check what is installed and get install options per
   platform.
 metadata:
-  version: "0.4.0-rc.1"
+  version: "0.4.0"
 ---
 
 ## Overview
