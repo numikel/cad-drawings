@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.4.0-rc.1] - 2026-10-29
+## [0.4.0] - 2026-10-29
 
 Fixes from a field report: an agent drew new geometry on a DWG with its own raw COM script, because `doctor` reported working packages as missing and the skill had no documented way to add content to a DWG. The scenario is now an eval (id 7); the before and after runs are in [docs/measurements.md](docs/measurements.md).
 
